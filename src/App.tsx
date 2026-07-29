@@ -13,7 +13,6 @@ import {
   FileText,
   History,
   LayoutDashboard,
-  LogIn,
   LogOut,
   Menu,
   MessageSquare,
@@ -1917,9 +1916,18 @@ function AdhyakshApp({
 
   return (
     <main className={`member-shell adhyaksh-shell ${sidebarOpen ? 'sidebar-open' : ''}`}>
-      <button className="mobile-menu-toggle" onClick={() => setSidebarOpen((open) => !open)} type="button">
-        {sidebarOpen ? <X size={22} /> : <Menu size={22} />}
-      </button>
+      <div className="mobile-workspace-bar">
+        <div className="mobile-workspace-brand">
+          {mandalIdentity.logoUrl ? <img alt="" src={mandalIdentity.logoUrl} /> : <span>{mandalIdentity.initials}</span>}
+          <div>
+            <strong>{mandalIdentity.name}</strong>
+            <small>{mandalIdentity.location}</small>
+          </div>
+        </div>
+        <button className="mobile-menu-toggle" onClick={() => setSidebarOpen((open) => !open)} type="button">
+          {sidebarOpen ? <X size={22} /> : <Menu size={22} />}
+        </button>
+      </div>
       {sidebarOpen && <button aria-label="Close menu" className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} type="button" />}
       <aside className="member-sidebar adhyaksh-sidebar">
         <div className="mandal-identity">
@@ -3405,47 +3413,17 @@ function LoginPanel({
     };
   }, []);
 
+  const shouldShowNotice = busy || (notice && notice !== 'Login with main mandal admin to open the console.');
+
   return (
     <main className="auth-page">
-      <section className="auth-brand-panel">
-        <div className="auth-brand">
-          <span>DV</span>
-          <div>
-            <strong>Digital Vargani</strong>
-            <small>Festival Collection OS</small>
-          </div>
-        </div>
-        <div className="auth-illustration">
-          <div className="receipt-card">
-            <ReceiptText size={40} />
-            <span>Digital Vargani Slip</span>
-            <strong>Rs. 2,100</strong>
-          </div>
-          <div className="auth-dots">
-            <span />
-            <span />
-            <span />
-          </div>
-        </div>
-        <p>Secure, simple, and fast collection for mandal teams.</p>
-      </section>
-
       <section className="auth-form-panel">
         <div className="auth-card">
           {isOwner && (
-            <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontSize: '14px', fontWeight: 800, color: '#ff4b12' }}>Super Admin Portal</span>
+            <div className="auth-back-row">
+              <span>Super Admin Access</span>
               <button
                 onClick={() => setLoginMode('mandal')}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: '#64748b',
-                  cursor: 'pointer',
-                  fontSize: '13px',
-                  fontWeight: 600,
-                  textDecoration: 'underline',
-                }}
                 type="button"
               >
                 Back to Login
@@ -3455,18 +3433,14 @@ function LoginPanel({
 
           <form className="login-panel clean" key={loginType} onSubmit={onSubmit}>
             <div className="panel-title">
-              {isOwner ? <ShieldCheck size={24} /> : <LogIn size={24} />}
+              <ShieldCheck size={24} />
               <div>
-                <strong>{isOwner ? 'Super Admin Login' : 'Login'}</strong>
-                <span>
-                  {isOwner
-                    ? 'Add mandals, manage client logins, and configure vargani templates.'
-                    : 'Use your mandal account. We will open the right workspace for your role.'}
-                </span>
+                <strong>Admin Portal</strong>
+                <span>Authorized Access Only</span>
               </div>
             </div>
             <label>
-              Email / Username
+              Username or Email
               <input
                 name="identifier"
                 required
@@ -3489,37 +3463,22 @@ function LoginPanel({
             </label>
             <button className="primary" disabled={busy} type="submit">
               <ShieldCheck size={18} />
-              {isOwner ? 'Login To Super Admin Console' : 'Login'}
+              Access Dashboard
             </button>
           </form>
 
-          <div className={`notice ${busy ? 'busy' : ''}`}>{busy ? 'Working...' : notice}</div>
-          <div className="login-help">
-            <strong>Do not have login details?</strong>
-            <span>Contact your mandal admin to create your member account.</span>
-          </div>
+          {shouldShowNotice && <div className={`notice ${busy ? 'busy' : ''}`}>{busy ? 'Working...' : notice}</div>}
 
           {isOwner && (
-            <div style={{ marginTop: '20px', textAlign: 'center' }}>
-              <button
-                onClick={() => setLoginMode('mandal')}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: '#64748b',
-                  cursor: 'pointer',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  textDecoration: 'underline',
-                }}
-                type="button"
-              >
-                Back to Login
-              </button>
-            </div>
+            <button className="auth-back-bottom" onClick={() => setLoginMode('mandal')} type="button">
+              Back to Login
+            </button>
           )}
         </div>
       </section>
+      <a className="auth-powered" href="https://www.bracketdex.com/" rel="noreferrer" target="_blank">
+        Powered by BracketDex Technologies
+      </a>
     </main>
   );
 }
