@@ -126,7 +126,7 @@ interface Group {
   id: string;
   areaName?: string | null;
   name: string;
-  leader?: { name: string; phone?: string | null } | null;
+  leader?: { id?: string; name: string; phone?: string | null } | null;
   _count?: { members: number; slips: number };
 }
 
@@ -196,6 +196,8 @@ interface FestivalTask {
   assignee?: { id: string; name: string; role: UserRole } | null;
   assigneeUserId?: string | null;
   dueDate?: string | null;
+  group?: { id: string; name: string; areaName?: string | null } | null;
+  groupId?: string | null;
   notes?: string | null;
   priority: TaskPriority;
   status: TaskStatus;
@@ -276,6 +278,7 @@ interface MandalWorkspaceBootstrap {
 type WorkspaceBootstrap = OwnerWorkspaceBootstrap | MandalWorkspaceBootstrap;
 
 const SESSION_KEY = 'digital-vargani-admin-session';
+const SESSION_EXPIRED_EVENT = 'digital-vargani-session-expired';
 const LANGUAGE_KEY = 'digital-vargani-language';
 const DEFAULT_OWNER_IDENTIFIER = 'owner@digitalvargani.local';
 const TEMPLATE_IMAGE = '/templates/default-vargani-receipt.svg';
@@ -439,6 +442,28 @@ export default function App() {
     window.localStorage.setItem(LANGUAGE_KEY, language);
     document.documentElement.lang = language === 'mr' ? 'mr' : language === 'hi' ? 'hi' : 'en';
   }, [language]);
+
+  useEffect(() => {
+    function handleSessionExpired() {
+      queryClient.clear();
+      setSession(null);
+      setActiveForm(null);
+      setGroups([]);
+      setMembers([]);
+      setCurrentMandal(null);
+      setExpenses([]);
+      setSlips([]);
+      setTasks([]);
+      setTemplates([]);
+      setReport(null);
+      setSelectedSlip(null);
+      setWorkspaceLoaded(false);
+      setNotice('Session expired. Login again to continue.');
+    }
+
+    window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+  }, [queryClient]);
 
   function startBusy(message = 'Loading') {
     setBusyMessage(message);
@@ -1214,20 +1239,64 @@ export default function App() {
     }
   }
 
-  async function createTask() {
+  function taskPayloadFromForm(form: FormData): Partial<FestivalTask> {
+    return {
+      assigneeUserId: String(form.get('assigneeUserId') || '') || undefined,
+      dueDate: String(form.get('dueDate') || '') || undefined,
+      groupId: String(form.get('groupId') || '') || undefined,
+      notes: String(form.get('notes') || '').trim() || undefined,
+      priority: String(form.get('priority') || 'MEDIUM') as TaskPriority,
+      status: String(form.get('status') || 'OPEN') as TaskStatus,
+      title: String(form.get('title') || '').trim(),
+    };
+  }
+
+  async function createGroup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
     if (!session || !mandalId || !festivalId) return;
-    const title = window.prompt('Task name');
-    if (!title?.trim()) return;
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get('name') || '').trim();
+    if (!name) return;
+    startBusy('Creating group...');
+    try {
+      await apiRequest(
+        `/mandals/${mandalId}/festivals/${festivalId}/groups`,
+        {
+          body: JSON.stringify({
+            areaName: String(form.get('areaName') || '').trim() || undefined,
+            leaderUserId: String(form.get('leaderUserId') || '') || undefined,
+            name,
+          }),
+          method: 'POST',
+        },
+        session,
+      );
+      event.currentTarget.reset();
+      await loadWorkspace(session);
+      setNotice('Group created.');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not create group.');
+    } finally {
+      stopBusy();
+    }
+  }
+
+  async function createTask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!session || !mandalId || !festivalId) return;
+    const payload = taskPayloadFromForm(new FormData(event.currentTarget));
+    if (!payload.title) return;
     startBusy('Creating task...');
     try {
       await apiRequest(
         `/mandals/${mandalId}/festivals/${festivalId}/tasks`,
         {
-          body: JSON.stringify({ priority: 'MEDIUM', status: 'OPEN', title: title.trim() }),
+          body: JSON.stringify(payload),
           method: 'POST',
         },
         session,
       );
+      event.currentTarget.reset();
       await loadWorkspace(session);
       setNotice('Task added.');
     } catch (error) {
@@ -1237,20 +1306,27 @@ export default function App() {
     }
   }
 
-  async function updateTask(task: FestivalTask, patch?: Partial<FestivalTask>) {
+  async function updateTask(task: FestivalTask, patch?: Partial<FestivalTask> | FormEvent<HTMLFormElement>) {
     if (!session || !mandalId || !festivalId) return;
-    const title = patch?.title ?? window.prompt('Task name', task.title);
-    if (!title) return;
+    const isFormEvent = patch && 'currentTarget' in patch;
+    if (isFormEvent) patch.preventDefault();
+    const nextPatch: Partial<FestivalTask> = isFormEvent
+      ? taskPayloadFromForm(new FormData(patch.currentTarget))
+      : patch ?? {};
+    const title = nextPatch?.title ?? task.title;
+    if (!title?.trim()) return;
     startBusy('Updating task...');
     try {
       await apiRequest(
         `/mandals/${mandalId}/festivals/${festivalId}/tasks/${task.id}`,
         {
           body: JSON.stringify({
-            dueDate: patch?.dueDate ?? task.dueDate,
-            notes: patch?.notes ?? task.notes,
-            priority: patch?.priority ?? task.priority,
-            status: patch?.status ?? task.status,
+            assigneeUserId: nextPatch?.assigneeUserId ?? task.assigneeUserId ?? undefined,
+            dueDate: nextPatch?.dueDate ?? task.dueDate ?? undefined,
+            groupId: nextPatch?.groupId ?? task.groupId ?? undefined,
+            notes: nextPatch?.notes ?? task.notes ?? undefined,
+            priority: nextPatch?.priority ?? task.priority,
+            status: nextPatch?.status ?? task.status,
             title,
           }),
           method: 'PATCH',
@@ -1472,6 +1548,7 @@ export default function App() {
       onCancelSlip={cancelSlip}
       onCreateMember={createMember}
       onCreateExpense={createExpense}
+      onCreateGroup={createGroup}
       onCreateCustomField={createCustomField}
       onCreateTask={createTask}
       onDeleteCustomField={deleteCustomField}
@@ -1481,7 +1558,7 @@ export default function App() {
       onEditExpense={updateExpense}
       onEditMember={updateMember}
       onEditSlip={updateSlip}
-      onEditTask={(task) => updateTask(task)}
+      onEditTask={(task, event) => updateTask(task, event)}
       onGenerate={generateSlip}
       onLogout={logout}
       onRemindMember={remindMember}
@@ -1649,6 +1726,7 @@ function AdhyakshApp({
   onCancelSlip,
   onCreateMember,
   onCreateExpense,
+  onCreateGroup,
   onCreateCustomField,
   onCreateTask,
   onDeleteCustomField,
@@ -1695,8 +1773,9 @@ function AdhyakshApp({
   onCancelSlip: (slip: Slip) => Promise<void> | void;
   onCreateMember: (event: FormEvent<HTMLFormElement>) => void;
   onCreateExpense: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
+  onCreateGroup: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
   onCreateCustomField: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
-  onCreateTask: () => Promise<void> | void;
+  onCreateTask: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
   onDeleteCustomField: (field: CustomField) => Promise<void> | void;
   onDeleteExpense: (expense: Expense) => Promise<void> | void;
   onDeleteTask: (task: FestivalTask) => Promise<void> | void;
@@ -1704,7 +1783,7 @@ function AdhyakshApp({
   onEditExpense: (expense: Expense) => Promise<void> | void;
   onEditMember: (member: Member) => Promise<void> | void;
   onEditSlip: (slip: Slip) => Promise<void> | void;
-  onEditTask: (task: FestivalTask) => Promise<void> | void;
+  onEditTask: (task: FestivalTask, event: FormEvent<HTMLFormElement>) => Promise<void> | void;
   onGenerate: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
   onLogout: () => void;
   onPreviewChange: (url: string) => void;
@@ -1732,6 +1811,9 @@ function AdhyakshApp({
   const [entryOpen, setEntryOpen] = useState(false);
   const [entryStatus, setEntryStatus] = useState<'ACTIVE' | 'PENDING'>('ACTIVE');
   const [memberOpen, setMemberOpen] = useState(false);
+  const [groupOpen, setGroupOpen] = useState(false);
+  const [taskOpen, setTaskOpen] = useState(false);
+  const [editingTask, setEditingTask] = useState<FestivalTask | null>(null);
   const [expenseOpen, setExpenseOpen] = useState(false);
   const [localNotice, setLocalNotice] = useState('');
   const [slipFilter, setSlipFilter] = useState<'all' | 'paid' | 'pending'>('all');
@@ -1909,6 +1991,23 @@ function AdhyakshApp({
               <Metric blue label="Mandal Expenses" note={metricNote('Paid by Mandal')} value={metricValue(money(expensesTotal))} />
               <Metric blue label="Remaining Balance" note={metricNote('Available Funds')} value={metricValue(money(balance))} />
             </div>
+            <div className="wide-card groups-card">
+              <div>
+                <h2>Collection Groups</h2>
+                <span>Create area-wise teams, assign a leader, and attach members or tasks to that group.</span>
+              </div>
+              <button className="blue-action" onClick={() => setGroupOpen(true)} type="button"><Plus size={18} />Add Group</button>
+              <div className="group-list">
+                {groups.length === 0 && <span className="soft-empty">No groups created yet. Add groups like Main Road, Bazaar Lane, or Sponsor Team.</span>}
+                {groups.map((group) => (
+                  <article className="group-chip-card" key={group.id}>
+                    <strong>{group.name}</strong>
+                    <span>{group.areaName || 'Area not set'}</span>
+                    <small>{group.leader?.name ? `Leader: ${group.leader.name}` : 'Leader not assigned'} · {group._count?.members ?? 0} members</small>
+                  </article>
+                ))}
+              </div>
+            </div>
             <div className="ops-table members-table">
               <div className="ops-head"><span>Name & Role</span><span>Contact</span><span>Vargani (2026)</span><span>Actions</span></div>
               {isInitialSync && <EmptyTableState message="Loading live member data..." />}
@@ -1933,22 +2032,25 @@ function AdhyakshApp({
           <section className="adhyaksh-page">
             <div className="wide-card action-card">
               <div><h2>Task Board (2026)</h2><span>Assign festival work and monitor open responsibilities.</span></div>
-              <button className="blue-action" onClick={() => void onCreateTask()} type="button"><Plus size={18} />Add Task</button>
+              <button className="blue-action" onClick={() => { setEditingTask(null); setTaskOpen(true); }} type="button"><Plus size={18} />Add Task</button>
             </div>
             <div className="metric-strip">
               <Metric label="Open Tasks" value={String(tasks.filter((task) => task.status !== 'DONE').length)} />
               <Metric blue label="Teams Assigned" value={String(new Set(tasks.map((task) => task.assignee?.name).filter(Boolean)).size)} />
               <Metric green label="This Week" value={String(tasks.length)} />
             </div>
-            <div className="ops-table">
-              <div className="ops-head five"><span>Task</span><span>Assignee</span><span>Due Date</span><span>Status</span><span>Actions</span></div>
+            <div className="ops-table tasks-table">
+              <div className="ops-head five"><span>Task</span><span>Owner / Group</span><span>Due Date</span><span>Status</span><span>Actions</span></div>
               {tasks.length === 0 && <EmptyTableState message="No tasks added yet." />}
               {tasks.map((task) => (
                 <div className="ops-row five" key={task.id}>
-                  <strong>{task.title}</strong><span>{task.assignee?.name ?? '-'}</span><span>{task.dueDate?.slice(0, 10) ?? '-'}</span><i className={task.status === 'DONE' ? 'pill paid' : 'pill pending'}>{task.status}</i>
+                  <strong>{task.title}<small>{task.notes || 'No notes'}</small></strong>
+                  <span>{task.assignee?.name ?? 'Unassigned'}<small>{task.group?.name ?? 'No group'}</small></span>
+                  <span>{task.dueDate?.slice(0, 10) ?? '-'}</span>
+                  <span><i className={task.status === 'DONE' ? 'pill paid' : 'pill pending'}>{task.status}</i><i className="pill mode">{task.priority}</i></span>
                   <span className="row-actions">
                     <button onClick={() => void onTaskDone(task)} type="button"><CheckCircle2 size={16} /></button>
-                    <button onClick={() => void onEditTask(task)} type="button"><Edit3 size={16} /></button>
+                    <button onClick={() => { setEditingTask(task); setTaskOpen(true); }} type="button"><Edit3 size={16} /></button>
                     <button onClick={() => void onDeleteTask(task)} type="button"><Trash2 size={16} /></button>
                   </span>
                 </div>
@@ -2133,6 +2235,93 @@ function AdhyakshApp({
             )}
             {(activeForm?.customFields ?? []).map((field) => <CustomFieldInput field={field} key={field.id} />)}
             <div className="modal-actions"><button type="button" onClick={() => setEntryOpen(false)}>Cancel</button><button className={entryStatus === 'PENDING' ? 'pending-action' : 'success'} onClick={(event) => { if (event.currentTarget.form?.checkValidity()) onPrepareWhatsApp(entryStatus); }} type="submit">{entryStatus === 'PENDING' ? <Clock size={18} /> : <CheckCircle2 size={18} />}{entryStatus === 'PENDING' ? 'Save as Pending' : 'Confirm & Generate Slip'}</button></div>
+          </form>
+        </div>
+      )}
+
+      {groupOpen && (
+        <div className="modal-backdrop">
+          <form className="vargani-modal adhyaksh-modal" onSubmit={async (event) => { await onCreateGroup(event); setGroupOpen(false); }}>
+            <button className="modal-close" onClick={() => setGroupOpen(false)} type="button"><X size={20} /></button>
+            <h2>Add Collection Group</h2>
+            <label>Group Name<input name="name" required placeholder="Main Road Team" /></label>
+            <label>Area / Locality<input name="areaName" placeholder="Main Road, Lohgaon" /></label>
+            <label>
+              Group Leader
+              <select name="leaderUserId" defaultValue="">
+                <option value="">Assign later</option>
+                {members.map((member) => (
+                  <option key={member.id} value={member.user?.id ?? ''}>{member.displayName}</option>
+                ))}
+              </select>
+            </label>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setGroupOpen(false)}>Cancel</button>
+              <button className="blue-action" type="submit">Create Group</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {taskOpen && (
+        <div className="modal-backdrop">
+          <form
+            className="vargani-modal adhyaksh-modal"
+            onSubmit={async (event) => {
+              if (editingTask) {
+                await onEditTask(editingTask, event);
+              } else {
+                await onCreateTask(event);
+              }
+              setTaskOpen(false);
+              setEditingTask(null);
+            }}
+          >
+            <button className="modal-close" onClick={() => { setTaskOpen(false); setEditingTask(null); }} type="button"><X size={20} /></button>
+            <h2>{editingTask ? 'Edit Task' : 'Add Task'}</h2>
+            <label>Task Name<input name="title" required defaultValue={editingTask?.title ?? ''} placeholder="Collect pending vargani from Main Road" /></label>
+            <label>
+              Assign To
+              <select name="assigneeUserId" defaultValue={editingTask?.assigneeUserId ?? ''}>
+                <option value="">Unassigned</option>
+                {members.map((member) => (
+                  <option key={member.id} value={member.user?.id ?? ''}>{member.displayName} ({member.user?.role?.replaceAll('_', ' ') ?? 'Member'})</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Group / Area
+              <select name="groupId" defaultValue={editingTask?.groupId ?? ''}>
+                <option value="">No group</option>
+                {groups.map((group) => (
+                  <option key={group.id} value={group.id}>{group.name}{group.areaName ? ` - ${group.areaName}` : ''}</option>
+                ))}
+              </select>
+            </label>
+            <label>Due Date<input name="dueDate" defaultValue={editingTask?.dueDate?.slice(0, 10) ?? ''} type="date" /></label>
+            <label>
+              Priority
+              <select name="priority" defaultValue={editingTask?.priority ?? 'MEDIUM'}>
+                <option value="LOW">Low</option>
+                <option value="MEDIUM">Medium</option>
+                <option value="HIGH">High</option>
+                <option value="URGENT">Urgent</option>
+              </select>
+            </label>
+            <label>
+              Status
+              <select name="status" defaultValue={editingTask?.status ?? 'OPEN'}>
+                <option value="OPEN">Open</option>
+                <option value="IN_PROGRESS">In Progress</option>
+                <option value="DONE">Done</option>
+                <option value="CANCELLED">Cancelled</option>
+              </select>
+            </label>
+            <label className="full">Notes<textarea name="notes" defaultValue={editingTask?.notes ?? ''} placeholder="What needs to be done, where, and any phone/payment detail." /></label>
+            <div className="modal-actions">
+              <button type="button" onClick={() => { setTaskOpen(false); setEditingTask(null); }}>Cancel</button>
+              <button className="blue-action" type="submit">{editingTask ? 'Save Task' : 'Create Task'}</button>
+            </div>
           </form>
         </div>
       )}
