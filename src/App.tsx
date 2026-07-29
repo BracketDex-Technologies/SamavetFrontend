@@ -49,6 +49,29 @@ type Language = 'en' | 'mr' | 'hi';
 type ExpenseStatus = 'DRAFT' | 'SUBMITTED' | 'APPROVED' | 'REJECTED';
 type TaskStatus = 'OPEN' | 'IN_PROGRESS' | 'DONE' | 'CANCELLED';
 type TaskPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+type ThemedDialogRequest =
+  | {
+      cancelLabel?: string;
+      confirmLabel?: string;
+      danger?: boolean;
+      message?: string;
+      resolve: (value: boolean) => void;
+      title: string;
+      type: 'confirm';
+    }
+  | {
+      cancelLabel?: string;
+      confirmLabel?: string;
+      danger?: boolean;
+      defaultValue?: string;
+      message?: string;
+      multiline?: boolean;
+      placeholder?: string;
+      resolve: (value: string | null) => void;
+      title: string;
+      type: 'prompt';
+    };
+type ThemedPromptOptions = Omit<Extract<ThemedDialogRequest, { type: 'prompt' }>, 'resolve' | 'type'>;
 
 interface TemplatePlacement {
   autoMarathi?: boolean;
@@ -119,6 +142,7 @@ interface Member {
   displayName: string;
   paidSlipCount?: number;
   phone?: string | null;
+  status?: string;
   group?: { id: string; name: string; areaName?: string | null } | null;
   groupId?: string | null;
   user?: { email?: string | null; id?: string; name: string; phone?: string | null; role: UserRole; status: string };
@@ -138,6 +162,29 @@ interface Group {
 
 function getMemberUserId(member: Member) {
   return member.user?.id ?? member.userId ?? '';
+}
+
+function isActiveMember(member: Member) {
+  return member.status !== 'ARCHIVED' && member.user?.status !== 'SUSPENDED';
+}
+
+function normalizeMemberResponse(response: Member | { member: Member; user?: Member['user'] }, groups: Group[]): Member {
+  if (!('member' in response)) return response;
+  const groupId = response.member.groupId ?? null;
+  const group = groupId
+    ? groups.find((item) => item.id === groupId) ?? response.member.group ?? null
+    : null;
+  return {
+    ...response.member,
+    group,
+    user: response.user ?? response.member.user,
+  };
+}
+
+function upsertById<T extends { id: string }>(items: T[], item: T) {
+  return items.some((current) => current.id === item.id)
+    ? items.map((current) => (current.id === item.id ? item : current))
+    : [item, ...items];
 }
 
 interface Slip {
@@ -393,7 +440,6 @@ export default function App() {
   const [slips, setSlips] = useState<Slip[]>([]);
   const [tasks, setTasks] = useState<FestivalTask[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
-  const [report, setReport] = useState<CollectionReport | null>(null);
   const [, setSelectedSlip] = useState<Slip | null>(null);
   const [templatePreview, setTemplatePreview] = useState<string>(TEMPLATE_IMAGE);
 
@@ -411,6 +457,7 @@ export default function App() {
   const [collectorModalOpen, setCollectorModalOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [themedDialog, setThemedDialog] = useState<ThemedDialogRequest | null>(null);
   const whatsappWindowRef = useRef<Window | null>(null);
   const [language, setLanguage] = useState<Language>(() => {
     const stored = window.localStorage.getItem(LANGUAGE_KEY);
@@ -466,7 +513,6 @@ export default function App() {
       setSlips([]);
       setTasks([]);
       setTemplates([]);
-      setReport(null);
       setSelectedSlip(null);
       setWorkspaceLoaded(false);
       setNotice('Session expired. Login again to continue.');
@@ -484,6 +530,37 @@ export default function App() {
   function stopBusy() {
     setBusy(false);
     setBusyMessage('');
+  }
+
+  function askConfirm(options: Omit<Extract<ThemedDialogRequest, { type: 'confirm' }>, 'resolve' | 'type'>) {
+    return new Promise<boolean>((resolve) => {
+      setThemedDialog({
+        ...options,
+        resolve,
+        type: 'confirm',
+      });
+    });
+  }
+
+  function askPrompt(options: ThemedPromptOptions) {
+    return new Promise<string | null>((resolve) => {
+      setThemedDialog({
+        ...options,
+        resolve,
+        type: 'prompt',
+      });
+    });
+  }
+
+  function closeThemedDialog(value?: boolean | string | null) {
+    const dialog = themedDialog;
+    setThemedDialog(null);
+    if (!dialog) return;
+    if (dialog.type === 'confirm') {
+      dialog.resolve(Boolean(value));
+      return;
+    }
+    dialog.resolve(typeof value === 'string' ? value : null);
   }
 
   async function saveTemplateConfig(
@@ -529,7 +606,7 @@ export default function App() {
 
       setNotice('Template saved to backend successfully.');
       await queryClient.invalidateQueries({ queryKey: workspaceQueryKey(session) });
-      await loadWorkspace(session);
+      void syncWorkspaceQuietly(session);
     } finally {
       stopBusy();
     }
@@ -559,7 +636,8 @@ export default function App() {
     event.preventDefault();
     if (!session || !session.user.mandalId || !activeForm) return;
 
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const label = String(form.get('label') || '').trim();
     const type = String(form.get('type') || 'TEXT');
     const options = String(form.get('options') || '')
@@ -572,9 +650,8 @@ export default function App() {
       return;
     }
 
-    startBusy('Adding form question...');
     try {
-      await apiRequest(
+      const field = await apiRequest<CustomField>(
         `/mandals/${session.user.mandalId}/festivals/${activeForm.festival.id}/custom-fields`,
         {
           body: JSON.stringify({
@@ -590,23 +667,22 @@ export default function App() {
         },
         session,
       );
-      event.currentTarget.reset();
+      setActiveForm((current) => current
+        ? { ...current, customFields: [...(current.customFields ?? []), field] }
+        : current);
+      formElement.reset();
       setNotice('Form question added.');
       await queryClient.invalidateQueries({ queryKey: workspaceQueryKey(session) });
-      await loadWorkspace(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not add form question.');
-    } finally {
-      stopBusy();
     }
   }
 
   async function updateCustomField(field: CustomField, patch: Partial<CustomField>) {
     if (!session || !session.user.mandalId || !activeForm) return;
 
-    startBusy('Updating form question...');
     try {
-      await apiRequest(
+      const updatedField = await apiRequest<CustomField>(
         `/mandals/${session.user.mandalId}/festivals/${activeForm.festival.id}/custom-fields/${field.id}`,
         {
           body: JSON.stringify(patch),
@@ -614,35 +690,41 @@ export default function App() {
         },
         session,
       );
+      setActiveForm((current) => current
+        ? {
+            ...current,
+            customFields: current.customFields.map((item) => (item.id === field.id ? updatedField : item)),
+          }
+        : current);
       setNotice('Form question updated.');
       await queryClient.invalidateQueries({ queryKey: workspaceQueryKey(session) });
-      await loadWorkspace(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update form question.');
-    } finally {
-      stopBusy();
     }
   }
 
   async function deleteCustomField(field: CustomField) {
     if (!session || !session.user.mandalId || !activeForm) return;
-    const confirmed = window.confirm(`Delete "${field.label}" from the vargani form? Existing slips will keep their old data.`);
+    const confirmed = await askConfirm({
+      danger: true,
+      message: `Existing slips will keep old data for "${field.label}".`,
+      title: 'Delete form question?',
+    });
     if (!confirmed) return;
 
-    startBusy('Deleting form question...');
     try {
       await apiRequest(
         `/mandals/${session.user.mandalId}/festivals/${activeForm.festival.id}/custom-fields/${field.id}`,
         { method: 'DELETE' },
         session,
       );
+      setActiveForm((current) => current
+        ? { ...current, customFields: current.customFields.filter((item) => item.id !== field.id) }
+        : current);
       setNotice('Form question deleted.');
       await queryClient.invalidateQueries({ queryKey: workspaceQueryKey(session) });
-      await loadWorkspace(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not delete form question.');
-    } finally {
-      stopBusy();
     }
   }
 
@@ -656,7 +738,6 @@ export default function App() {
       setSlips([]);
       setTasks([]);
       setTemplates([]);
-      setReport(null);
       setSelectedSlip(null);
       setDemoMandals(ownerMandals);
       setCurrentMandal(null);
@@ -664,16 +745,27 @@ export default function App() {
       return;
     }
 
+    const activeMembers = payload.members.filter(isActiveMember);
+    const activeUserIds = new Set(activeMembers.map(getMemberUserId).filter(Boolean));
+    const activeGroups = payload.groups.map((group) => {
+      const members = (group.members ?? []).filter(isActiveMember);
+      const leader = group.leader?.id && !activeUserIds.has(group.leader.id) ? null : group.leader;
+      return {
+        ...group,
+        leader,
+        members,
+        _count: group._count ? { ...group._count, members: members.length } : group._count,
+      };
+    });
     const nextSlips = payload.slips.items;
     setCurrentMandal(payload.mandal ? mapBackendMandal(payload.mandal) : null);
     setActiveForm(payload.activeForm);
-    setGroups(payload.groups);
-    setMembers(payload.members);
+    setGroups(activeGroups);
+    setMembers(activeMembers);
     setExpenses([]);
     setSlips(nextSlips);
     setTasks([]);
     setTemplates(payload.templates);
-    setReport(payload.report);
     setSelectedSlip(nextSlips[0] ?? null);
     const activeVersion = findActiveTemplateVersion(payload.templates);
     setTemplatePreview(resolveTemplateAssetUrl(activeVersion?.backgroundFileUrl || TEMPLATE_IMAGE));
@@ -764,11 +856,26 @@ export default function App() {
     setSlips([]);
     setTasks([]);
     setTemplates([]);
-    setReport(null);
     setSelectedSlip(null);
     setWorkspaceLoaded(false);
     setNotice('Logged out. Login again to use the console.');
     setWorkspaceRefreshing(false);
+  }
+
+  async function syncWorkspaceQuietly(currentSession = session) {
+    if (!currentSession) return;
+    try {
+      const workspace = await apiRequest<WorkspaceBootstrap>('/workspace/bootstrap', {}, currentSession);
+      queryClient.setQueryData(workspaceQueryKey(currentSession), workspace);
+      applyWorkspaceBootstrap(workspace);
+      if (workspace.kind === 'MANDAL' && currentSession.user.mandalId && workspace.activeForm?.festival.id) {
+        const festivalPath = `/mandals/${currentSession.user.mandalId}/festivals/${workspace.activeForm.festival.id}`;
+        const liveTasks = await apiRequest<FestivalTask[]>(`${festivalPath}/tasks`, {}, currentSession);
+        setTasks(liveTasks);
+      }
+    } catch {
+      // Keep the optimistic UI. The next manual refresh will reconcile if the quiet sync fails.
+    }
   }
 
   async function loadWorkspace(currentSession = session) {
@@ -779,20 +886,20 @@ export default function App() {
       queryClient.setQueryData(workspaceQueryKey(currentSession), workspace);
       applyWorkspaceBootstrap(workspace);
       if (workspace.kind === 'MANDAL' && currentSession.user.mandalId && workspace.activeForm?.festival.id) {
-        const [liveExpenses, liveTasks] = await Promise.all([
-          apiRequest<Expense[]>(
-            `/mandals/${currentSession.user.mandalId}/festivals/${workspace.activeForm.festival.id}/expenses`,
-            {},
-            currentSession,
-          ),
-          apiRequest<FestivalTask[]>(
-            `/mandals/${currentSession.user.mandalId}/festivals/${workspace.activeForm.festival.id}/tasks`,
-            {},
-            currentSession,
-          ),
-        ]);
-        setExpenses(liveExpenses);
-        setTasks(liveTasks);
+        const festivalPath = `/mandals/${currentSession.user.mandalId}/festivals/${workspace.activeForm.festival.id}`;
+        const isCollectorSession = currentSession.user.role === 'MEMBER' || currentSession.user.role === 'GROUP_LEADER';
+        if (isCollectorSession) {
+          const liveTasks = await apiRequest<FestivalTask[]>(`${festivalPath}/tasks`, {}, currentSession);
+          setExpenses([]);
+          setTasks(liveTasks);
+        } else {
+          const [liveExpenses, liveTasks] = await Promise.all([
+            apiRequest<Expense[]>(`${festivalPath}/expenses`, {}, currentSession),
+            apiRequest<FestivalTask[]>(`${festivalPath}/tasks`, {}, currentSession),
+          ]);
+          setExpenses(liveExpenses);
+          setTasks(liveTasks);
+        }
       }
       setNotice(
         workspace.kind === 'OWNER'
@@ -808,16 +915,16 @@ export default function App() {
 
   async function createMember(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!session || !mandalId || !festivalId) return;
-    const form = new FormData(event.currentTarget);
+    if (!session || !mandalId || !festivalId) return false;
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const password = String(form.get('password') || '');
     if (!password) {
       setNotice('Password is required to create a member login.');
-      return;
+      return false;
     }
-    startBusy('Creating member login...');
     try {
-      await apiRequest(
+      const response = await apiRequest<Member | { member: Member; user?: Member['user'] }>(
         `/mandals/${mandalId}/festivals/${festivalId}/members`,
         {
           body: JSON.stringify({
@@ -833,13 +940,15 @@ export default function App() {
         },
         session,
       );
-      event.currentTarget.reset();
-      await loadWorkspace(session);
+      const member = normalizeMemberResponse(response, groups);
+      setMembers((current) => upsertById(current, member));
+      formElement.reset();
       setNotice('Member login created successfully.');
+      void syncWorkspaceQuietly(session);
+      return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not create member login.');
-    } finally {
-      stopBusy();
+      return false;
     }
   }
 
@@ -912,7 +1021,7 @@ export default function App() {
           session,
         );
         formElement.reset();
-        await loadWorkspace(session);
+        setDemoMandals((current) => [mapBackendMandal(created.mandal), ...current]);
         setNotice(`${newMandal.name} added. Admin password: ${newMandal.adminPassword}`);
         return { id: created.mandal.id, ok: true };
       } catch (error) {
@@ -929,8 +1038,9 @@ export default function App() {
 
   async function generateSlip(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!session) return;
-    const form = new FormData(event.currentTarget);
+    if (!session) return false;
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const paymentStatus = String(form.get('paymentStatus') || 'ACTIVE') === 'PENDING' ? 'PENDING' : 'ACTIVE';
     const contributorPhone = String(form.get('contributorPhone') || '');
     if (paymentStatus === 'ACTIVE' && !whatsappWindowRef.current) {
@@ -950,7 +1060,6 @@ export default function App() {
     }
     const whatsappWindow = paymentStatus === 'ACTIVE' ? whatsappWindowRef.current : null;
     whatsappWindowRef.current = null;
-    startBusy(paymentStatus === 'PENDING' ? 'Saving pending vargani...' : 'Creating vargani slip...');
     try {
       const slip = await apiRequest<Slip>(
         '/vargani/slips',
@@ -974,21 +1083,29 @@ export default function App() {
       );
       setSlips((current) => [slip, ...current]);
       setSelectedSlip(slip);
-      event.currentTarget.reset();
-      await loadWorkspace(session);
+      formElement.reset();
+      void syncWorkspaceQuietly(session);
       if (paymentStatus === 'PENDING') {
         whatsappWindow?.close();
         setNotice(`Pending vargani entry ${slip.slipNumber} saved.`);
       } else {
-        const share = await createReceiptShare(slip, contributorPhone);
-        await shareReceiptToWhatsApp(slip, contributorPhone, whatsappWindow, share?.receiptUrl);
-        setNotice(`Slip ${slip.slipNumber} generated. WhatsApp opened and receipt message copied.`);
+        setNotice(`Slip ${slip.slipNumber} generated. Preparing WhatsApp share...`);
+        void (async () => {
+          try {
+            const share = await createReceiptShare(slip, contributorPhone);
+            await shareReceiptToWhatsApp(slip, contributorPhone, whatsappWindow, share?.receiptUrl);
+            setNotice(`Slip ${slip.slipNumber} generated. WhatsApp opened and receipt message copied.`);
+          } catch (error) {
+            whatsappWindow?.close();
+            setNotice(error instanceof Error ? error.message : 'Slip saved, but WhatsApp share could not be opened.');
+          }
+        })();
       }
+      return true;
     } catch (error) {
       whatsappWindow?.close();
       setNotice(error instanceof Error ? error.message : 'Could not generate slip.');
-    } finally {
-      stopBusy();
+      return false;
     }
   }
 
@@ -1178,13 +1295,13 @@ export default function App() {
 
   async function createExpense(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!session || !mandalId || !festivalId) return;
-    const form = new FormData(event.currentTarget);
+    if (!session || !mandalId || !festivalId) return false;
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const description = String(form.get('description') || '').trim();
     const category = String(form.get('category') || '').trim();
-    startBusy('Saving expense...');
     try {
-      await apiRequest(
+      const expense = await apiRequest<Expense>(
         `/mandals/${mandalId}/festivals/${festivalId}/expenses`,
         {
           body: JSON.stringify({
@@ -1198,23 +1315,31 @@ export default function App() {
         },
         session,
       );
-      await loadWorkspace(session);
+      setExpenses((current) => upsertById(current, expense));
+      formElement.reset();
       setNotice('Expense saved to backend.');
+      return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not save expense.');
-    } finally {
-      stopBusy();
+      return false;
     }
   }
 
   async function updateExpense(expense: Expense) {
     if (!session || !mandalId || !festivalId) return;
-    const amount = window.prompt('Expense amount', String(expense.amount));
+    const amount = await askPrompt({
+      defaultValue: String(expense.amount),
+      placeholder: 'Enter expense amount',
+      title: 'Expense amount',
+    });
     if (amount === null) return;
-    const vendorName = window.prompt('Vendor name', expense.vendorName ?? '') ?? expense.vendorName ?? '';
-    startBusy('Updating expense...');
+    const vendorName = await askPrompt({
+      defaultValue: expense.vendorName ?? '',
+      placeholder: 'Enter vendor name',
+      title: 'Vendor name',
+    }) ?? expense.vendorName ?? '';
     try {
-      await apiRequest(
+      const updatedExpense = await apiRequest<Expense>(
         `/mandals/${mandalId}/festivals/${festivalId}/expenses/${expense.id}`,
         {
           body: JSON.stringify({
@@ -1228,30 +1353,31 @@ export default function App() {
         },
         session,
       );
-      await loadWorkspace(session);
+      setExpenses((current) => upsertById(current, updatedExpense));
       setNotice('Expense updated.');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update expense.');
-    } finally {
-      stopBusy();
     }
   }
 
   async function deleteExpense(expense: Expense) {
-    if (!session || !mandalId || !festivalId || !window.confirm('Delete this expense permanently?')) return;
-    startBusy('Deleting expense...');
+    if (!session || !mandalId || !festivalId) return;
+    const confirmed = await askConfirm({
+      danger: true,
+      message: `${expense.vendorName || expense.notes || 'This expense'} will be permanently deleted.`,
+      title: 'Delete expense?',
+    });
+    if (!confirmed) return;
     try {
       await apiRequest(
         `/mandals/${mandalId}/festivals/${festivalId}/expenses/${expense.id}`,
         { method: 'DELETE' },
         session,
       );
-      await loadWorkspace(session);
+      setExpenses((current) => current.filter((item) => item.id !== expense.id));
       setNotice('Expense deleted.');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not delete expense.');
-    } finally {
-      stopBusy();
     }
   }
 
@@ -1269,13 +1395,13 @@ export default function App() {
 
   async function createGroup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!session || !mandalId || !festivalId) return;
-    const form = new FormData(event.currentTarget);
+    if (!session || !mandalId || !festivalId) return false;
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const name = String(form.get('name') || '').trim();
-    if (!name) return;
-    startBusy('Creating group...');
+    if (!name) return false;
     try {
-      await apiRequest(
+      const group = await apiRequest<Group>(
         `/mandals/${mandalId}/festivals/${festivalId}/groups`,
         {
           body: JSON.stringify({
@@ -1287,21 +1413,21 @@ export default function App() {
         },
         session,
       );
-      event.currentTarget.reset();
-      await loadWorkspace(session);
+      setGroups((current) => upsertById(current, group));
+      formElement.reset();
       setNotice('Group created.');
+      void syncWorkspaceQuietly(session);
+      return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not create group.');
-    } finally {
-      stopBusy();
+      return false;
     }
   }
 
   async function updateGroup(groupId: string, patch: { areaName?: string | null; leaderUserId?: string | null; name?: string }) {
     if (!session || !mandalId || !festivalId) return;
-    startBusy('Saving group...');
     try {
-      await apiRequest(
+      const group = await apiRequest<Group>(
         `/mandals/${mandalId}/festivals/${festivalId}/groups/${groupId}`,
         {
           body: JSON.stringify(patch),
@@ -1309,23 +1435,22 @@ export default function App() {
         },
         session,
       );
-      await loadWorkspace(session);
+      setGroups((current) => upsertById(current, group));
       setNotice('Group updated.');
+      void syncWorkspaceQuietly(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update group.');
-    } finally {
-      stopBusy();
     }
   }
 
   async function createTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!session || !mandalId || !festivalId) return;
-    const payload = taskPayloadFromForm(new FormData(event.currentTarget));
-    if (!payload.title) return;
-    startBusy('Creating task...');
+    if (!session || !mandalId || !festivalId) return false;
+    const formElement = event.currentTarget;
+    const payload = taskPayloadFromForm(new FormData(formElement));
+    if (!payload.title) return false;
     try {
-      await apiRequest(
+      const task = await apiRequest<FestivalTask>(
         `/mandals/${mandalId}/festivals/${festivalId}/tasks`,
         {
           body: JSON.stringify(payload),
@@ -1333,13 +1458,13 @@ export default function App() {
         },
         session,
       );
-      event.currentTarget.reset();
-      await loadWorkspace(session);
+      setTasks((current) => upsertById(current, task));
+      formElement.reset();
       setNotice('Task added.');
+      return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not add task.');
-    } finally {
-      stopBusy();
+      return false;
     }
   }
 
@@ -1352,9 +1477,8 @@ export default function App() {
       : patch ?? {};
     const title = nextPatch?.title ?? task.title;
     if (!title?.trim()) return;
-    startBusy('Updating task...');
     try {
-      await apiRequest(
+      const updatedTask = await apiRequest<FestivalTask>(
         `/mandals/${mandalId}/festivals/${festivalId}/tasks/${task.id}`,
         {
           body: JSON.stringify({
@@ -1370,42 +1494,54 @@ export default function App() {
         },
         session,
       );
-      await loadWorkspace(session);
+      setTasks((current) => upsertById(current, updatedTask));
       setNotice('Task updated.');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update task.');
-    } finally {
-      stopBusy();
     }
   }
 
   async function deleteTask(task: FestivalTask) {
-    if (!session || !mandalId || !festivalId || !window.confirm('Delete this task?')) return;
-    startBusy('Deleting task...');
+    if (!session || !mandalId || !festivalId) return;
+    const confirmed = await askConfirm({
+      danger: true,
+      message: task.title,
+      title: 'Delete task?',
+    });
+    if (!confirmed) return;
     try {
       await apiRequest(
         `/mandals/${mandalId}/festivals/${festivalId}/tasks/${task.id}`,
         { method: 'DELETE' },
         session,
       );
-      await loadWorkspace(session);
+      setTasks((current) => current.filter((item) => item.id !== task.id));
       setNotice('Task deleted.');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not delete task.');
-    } finally {
-      stopBusy();
     }
   }
 
   async function updateMember(member: Member) {
     if (!session || !mandalId || !festivalId) return;
-    const name = window.prompt('Member name', member.displayName);
+    const name = await askPrompt({
+      defaultValue: member.displayName,
+      placeholder: 'Enter member name',
+      title: 'Member name',
+    });
     if (!name?.trim()) return;
-    const phone = window.prompt('Phone number', member.phone ?? member.user?.phone ?? '') ?? member.phone ?? member.user?.phone ?? '';
-    const areaName = window.prompt('Area', member.areaName ?? '') ?? member.areaName ?? '';
-    startBusy('Updating member...');
+    const phone = await askPrompt({
+      defaultValue: member.phone ?? member.user?.phone ?? '',
+      placeholder: 'Enter phone number',
+      title: 'Phone number',
+    }) ?? member.phone ?? member.user?.phone ?? '';
+    const areaName = await askPrompt({
+      defaultValue: member.areaName ?? '',
+      placeholder: 'Enter area',
+      title: 'Area',
+    }) ?? member.areaName ?? '';
     try {
-      await apiRequest(
+      const updatedMember = await apiRequest<Member>(
         `/mandals/${mandalId}/festivals/${festivalId}/members/${member.id}`,
         {
           body: JSON.stringify({ areaName, name: name.trim(), phone, role: member.user?.role ?? 'MEMBER' }),
@@ -1413,12 +1549,10 @@ export default function App() {
         },
         session,
       );
-      await loadWorkspace(session);
+      setMembers((current) => upsertById(current, updatedMember));
       setNotice('Member updated.');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update member.');
-    } finally {
-      stopBusy();
     }
   }
 
@@ -1426,9 +1560,8 @@ export default function App() {
     if (!session || !mandalId || !festivalId) return;
     const userId = getMemberUserId(member);
     const isOrphanLeader = member.user?.role === 'GROUP_LEADER' && !groups.some((group) => group.leader?.id === userId);
-    startBusy('Assigning group...');
     try {
-      await apiRequest(
+      const updatedMember = await apiRequest<Member>(
         `/mandals/${mandalId}/festivals/${festivalId}/members/${member.id}`,
         {
           body: JSON.stringify({
@@ -1442,30 +1575,45 @@ export default function App() {
         },
         session,
       );
-      await loadWorkspace(session);
+      setMembers((current) => upsertById(current, updatedMember));
       setNotice(isOrphanLeader ? 'Member assigned to group and old orphan leader role cleaned.' : 'Member group updated.');
+      void syncWorkspaceQuietly(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update member group.');
-    } finally {
-      stopBusy();
     }
   }
 
   async function archiveMember(member: Member) {
-    if (!session || !mandalId || !festivalId || !window.confirm(`Archive ${member.displayName}?`)) return;
-    startBusy('Archiving member...');
+    if (!session || !mandalId || !festivalId) return;
+    const confirmed = await askConfirm({
+      danger: true,
+      message: `${member.displayName} will be removed from the active member list.`,
+      title: 'Archive member?',
+    });
+    if (!confirmed) return;
     try {
       await apiRequest(
         `/mandals/${mandalId}/festivals/${festivalId}/members/${member.id}`,
         { method: 'DELETE' },
         session,
       );
-      await loadWorkspace(session);
+      setMembers((current) => current.filter((item) => item.id !== member.id));
+      const userId = getMemberUserId(member);
+      setGroups((current) => current.map((group) => {
+        const hadMember = (group.members ?? []).some((item) => item.id === member.id);
+        return {
+          ...group,
+          leader: group.leader?.id && group.leader.id === userId ? null : group.leader,
+          members: (group.members ?? []).filter((item) => item.id !== member.id),
+          _count: group._count && hadMember
+            ? { ...group._count, members: Math.max(0, group._count.members - 1) }
+            : group._count,
+        };
+      }));
       setNotice('Member archived.');
+      void syncWorkspaceQuietly(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not archive member.');
-    } finally {
-      stopBusy();
     }
   }
 
@@ -1482,14 +1630,26 @@ export default function App() {
 
   async function updateSlip(slip: Slip) {
     if (!session) return;
-    const amount = window.prompt('Slip amount', String(slip.amount));
+    const amount = await askPrompt({
+      defaultValue: String(slip.amount),
+      placeholder: 'Enter slip amount',
+      title: 'Slip amount',
+    });
     if (amount === null) return;
-    const contributorName = window.prompt('Contributor name', slip.contributorName) ?? slip.contributorName;
-    const statusInput = window.prompt('Status: ACTIVE or PENDING', isSlipPaid(slip) ? 'ACTIVE' : 'PENDING')?.toUpperCase();
+    const contributorName = await askPrompt({
+      defaultValue: slip.contributorName,
+      placeholder: 'Enter contributor name',
+      title: 'Contributor name',
+    }) ?? slip.contributorName;
+    const statusInput = (await askPrompt({
+      defaultValue: isSlipPaid(slip) ? 'ACTIVE' : 'PENDING',
+      message: 'Use ACTIVE for paid slips or PENDING for unpaid slips.',
+      placeholder: 'ACTIVE or PENDING',
+      title: 'Slip status',
+    }))?.toUpperCase();
     const status = statusInput === 'PENDING' ? 'PENDING' : 'ACTIVE';
-    startBusy('Updating slip...');
     try {
-      await apiRequest(
+      const updatedSlip = await apiRequest<Slip>(
         `/vargani/slips/${slip.id}`,
         {
           body: JSON.stringify({
@@ -1507,20 +1667,24 @@ export default function App() {
         },
         session,
       );
-      await loadWorkspace(session);
+      setSlips((current) => upsertById(current, updatedSlip));
       setNotice('Slip updated.');
+      void syncWorkspaceQuietly(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update slip.');
-    } finally {
-      stopBusy();
     }
   }
 
   async function cancelSlip(slip: Slip) {
-    if (!session || !window.confirm(`Cancel slip ${slip.slipNumber}?`)) return;
-    startBusy('Cancelling slip...');
+    if (!session) return;
+    const confirmed = await askConfirm({
+      danger: true,
+      message: `${slip.slipNumber} for ${slip.contributorName} will be cancelled.`,
+      title: 'Cancel slip?',
+    });
+    if (!confirmed) return;
     try {
-      await apiRequest(
+      const cancelledSlip = await apiRequest<Slip>(
         `/vargani/slips/${slip.id}/cancel`,
         {
           body: JSON.stringify({ reason: 'Cancelled from Adhyaksh console' }),
@@ -1528,12 +1692,11 @@ export default function App() {
         },
         session,
       );
-      await loadWorkspace(session);
+      setSlips((current) => upsertById(current, cancelledSlip));
       setNotice('Slip cancelled.');
+      void syncWorkspaceQuietly(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not cancel slip.');
-    } finally {
-      stopBusy();
     }
   }
 
@@ -1546,6 +1709,7 @@ export default function App() {
     <>
       {content}
       {overlayMessage && <ActionLoaderOverlay message={overlayMessage} />}
+      {themedDialog && <ThemedDialogModal dialog={themedDialog} onClose={closeThemedDialog} />}
     </>
   );
 
@@ -1572,10 +1736,12 @@ export default function App() {
         onModalChange={setCollectorModalOpen}
         onPrepareWhatsApp={prepareWhatsAppWindow}
         onShareSlip={shareSlip}
+        onTaskDone={(task) => updateTask(task, { status: 'DONE' })}
         mandal={currentMandal}
         session={session}
         setSelectedSlip={setSelectedSlip}
         slips={slips}
+        tasks={tasks}
       />,
     );
   }
@@ -1594,6 +1760,7 @@ export default function App() {
         onCreateMandal={createMandal}
         onLanguageChange={setLanguage}
         onLogout={logout}
+        onPrompt={askPrompt}
         onTemplateSaved={saveTemplateConfig}
         sidebarOpen={sidebarOpen}
         setSidebarOpen={setSidebarOpen}
@@ -1630,6 +1797,7 @@ export default function App() {
       onEditTask={(task, event) => updateTask(task, event)}
       onGenerate={generateSlip}
       onLogout={logout}
+      onPrompt={askPrompt}
       onRemindMember={remindMember}
       onRefresh={() => loadWorkspace()}
       onShareSlip={shareSlip}
@@ -1638,7 +1806,6 @@ export default function App() {
       onUpdateCustomField={updateCustomField}
       onUpdateGroup={updateGroup}
       query={query}
-      report={report}
       session={session}
       setQuery={setQuery}
       setSelectedSlip={setSelectedSlip}
@@ -1812,6 +1979,7 @@ function AdhyakshApp({
   onLogout,
   onPreviewChange,
   onPrepareWhatsApp,
+  onPrompt,
   onRemindMember,
   onRefresh,
   onShareSlip,
@@ -1820,7 +1988,6 @@ function AdhyakshApp({
   onUpdateCustomField,
   onUpdateGroup,
   query,
-  report,
   session,
   setQuery,
   setSelectedSlip,
@@ -1844,11 +2011,11 @@ function AdhyakshApp({
   onArchiveMember: (member: Member) => Promise<void> | void;
   onAssignMemberGroup: (member: Member, groupId: string) => Promise<void> | void;
   onCancelSlip: (slip: Slip) => Promise<void> | void;
-  onCreateMember: (event: FormEvent<HTMLFormElement>) => void;
-  onCreateExpense: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
-  onCreateGroup: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
+  onCreateMember: (event: FormEvent<HTMLFormElement>) => Promise<boolean | void> | boolean | void;
+  onCreateExpense: (event: FormEvent<HTMLFormElement>) => Promise<boolean | void> | boolean | void;
+  onCreateGroup: (event: FormEvent<HTMLFormElement>) => Promise<boolean | void> | boolean | void;
   onCreateCustomField: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
-  onCreateTask: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
+  onCreateTask: (event: FormEvent<HTMLFormElement>) => Promise<boolean | void> | boolean | void;
   onDeleteCustomField: (field: CustomField) => Promise<void> | void;
   onDeleteExpense: (expense: Expense) => Promise<void> | void;
   onDeleteTask: (task: FestivalTask) => Promise<void> | void;
@@ -1857,10 +2024,11 @@ function AdhyakshApp({
   onEditMember: (member: Member) => Promise<void> | void;
   onEditSlip: (slip: Slip) => Promise<void> | void;
   onEditTask: (task: FestivalTask, event: FormEvent<HTMLFormElement>) => Promise<void> | void;
-  onGenerate: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
+  onGenerate: (event: FormEvent<HTMLFormElement>) => Promise<boolean | void> | boolean | void;
   onLogout: () => void;
   onPreviewChange: (url: string) => void;
   onPrepareWhatsApp: (paymentStatus: 'ACTIVE' | 'PENDING') => void;
+  onPrompt: (options: ThemedPromptOptions) => Promise<string | null>;
   onRemindMember: (member: Member) => void;
   onRefresh: () => void;
   onShareSlip: (slip: Slip) => Promise<void>;
@@ -1869,7 +2037,6 @@ function AdhyakshApp({
   onUpdateCustomField: (field: CustomField, patch: Partial<CustomField>) => Promise<void> | void;
   onUpdateGroup: (groupId: string, patch: { areaName?: string | null; leaderUserId?: string | null; name?: string }) => Promise<void> | void;
   query: string;
-  report: CollectionReport | null;
   session: AuthSession;
   setQuery: (value: string) => void;
   setSelectedSlip: (slip: Slip) => void;
@@ -1889,6 +2056,7 @@ function AdhyakshApp({
   const [taskOpen, setTaskOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<FestivalTask | null>(null);
   const [expenseOpen, setExpenseOpen] = useState(false);
+  const [modalSubmitting, setModalSubmitting] = useState<null | 'entry' | 'expense' | 'group' | 'member' | 'task'>(null);
   const [localNotice, setLocalNotice] = useState('');
   const [slipFilter, setSlipFilter] = useState<'all' | 'paid' | 'pending'>('all');
   const mandalIdentity = getMandalIdentity(mandal, session);
@@ -1943,18 +2111,20 @@ function AdhyakshApp({
     const rows = memberRowsByGroup.get(group.id) ?? [];
     const leaderRow = group.leader?.id ? memberRows.find((row) => memberUserId(row.member) === group.leader?.id) : undefined;
     const memberRowsForGroup = leaderRow && !rows.some((row) => row.member.id === leaderRow.member.id) ? [leaderRow, ...rows] : rows;
+    const collectedByCurrentMembers = memberRowsForGroup.reduce((sum, row) => sum + row.collected, 0);
+    const slipsByCurrentMembers = memberRowsForGroup.reduce((sum, row) => sum + row.paidSlipCount, 0);
     return {
       ...group,
-      collected: Number(group.collectionTotal ?? collectionByGroup.get(group.id) ?? 0),
+      collected: collectedByCurrentMembers || Number(group.collectionTotal ?? collectionByGroup.get(group.id) ?? 0),
       memberRows: memberRowsForGroup,
       memberCount: memberRowsForGroup.length || group._count?.members || group.members?.length || 0,
-      slipCount: Number(group.paidSlipCount ?? group._count?.slips ?? 0),
+      slipCount: slipsByCurrentMembers || Number(group.paidSlipCount ?? group._count?.slips ?? 0),
     };
   });
   const memberVargani = memberRows.filter((member) => member.paid).reduce((sum, member) => sum + member.vargani, 0);
   const pendingMemberVargani = memberRows.filter((member) => !member.paid).reduce((sum, member) => sum + member.vargani, 0);
   const expensesTotal = expenses.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  const balance = Number(report?.balance ?? totalSlipCollection + memberVargani - expensesTotal);
+  const balance = totalSlipCollection + memberVargani - expensesTotal;
   const isInitialSync = workspaceRefreshing && !workspaceLoaded;
   const displayNotice = localNotice || (notice && /error|failed|expired|could not|logged out|unauthorized/i.test(notice) ? notice : '');
   const metricValue = (value: string) => (workspaceLoaded ? value : '--');
@@ -2127,7 +2297,7 @@ function AdhyakshApp({
                     <div className="group-chip-top">
                       <div>
                         <strong>{group.name}</strong>
-                        <span>{group.areaName || 'Area not set'}</span>
+                        {group.areaName && <span>{group.areaName}</span>}
                       </div>
                       <b>{money(group.collected)}</b>
                     </div>
@@ -2261,6 +2431,7 @@ function AdhyakshApp({
               latestTemplateVersion={latestTemplateVersion}
               onAddField={() => undefined}
               onPreviewChange={onPreviewChange}
+              onPrompt={onPrompt}
               onSaveTemplate={saveTemplate}
               templatePreview={templatePreview}
             />
@@ -2328,6 +2499,7 @@ function AdhyakshApp({
             busy={busy}
             onCreateField={onCreateCustomField}
             onDeleteField={onDeleteCustomField}
+            onPrompt={onPrompt}
             onUpdateField={onUpdateCustomField}
           />
         )}
@@ -2384,8 +2556,18 @@ function AdhyakshApp({
 
       {entryOpen && (
         <div className="modal-backdrop">
-          <form className="vargani-modal adhyaksh-modal" onSubmit={async (event) => { await onGenerate(event); setEntryOpen(false); setEntryStatus('ACTIVE'); }}>
-            <button className="modal-close" onClick={() => setEntryOpen(false)} type="button"><X size={20} /></button>
+          <form className="vargani-modal adhyaksh-modal" onSubmit={async (event) => {
+            setModalSubmitting('entry');
+            try {
+              const ok = await onGenerate(event);
+              if (!ok) return;
+              setEntryOpen(false);
+              setEntryStatus('ACTIVE');
+            } finally {
+              setModalSubmitting(null);
+            }
+          }}>
+            <button className="modal-close" disabled={modalSubmitting === 'entry'} onClick={() => setEntryOpen(false)} type="button"><X size={20} /></button>
             <h2>New Vargani Entry</h2>
             <label>Name<input name="contributorName" required placeholder="Enter full name" /></label>
             <label>Shop Name<input name="shopName" placeholder="Enter shop / business name" /></label>
@@ -2408,15 +2590,23 @@ function AdhyakshApp({
               <label className="pending-date-card">Tentative Payment Date<input name="tentativePaymentDate" type="date" /></label>
             )}
             {(activeForm?.customFields ?? []).map((field) => <CustomFieldInput field={field} key={field.id} />)}
-            <div className="modal-actions"><button type="button" onClick={() => setEntryOpen(false)}>Cancel</button><button className={entryStatus === 'PENDING' ? 'pending-action' : 'success'} onClick={(event) => { if (event.currentTarget.form?.checkValidity()) onPrepareWhatsApp(entryStatus); }} type="submit">{entryStatus === 'PENDING' ? <Clock size={18} /> : <CheckCircle2 size={18} />}{entryStatus === 'PENDING' ? 'Save as Pending' : 'Confirm & Generate Slip'}</button></div>
+            <div className="modal-actions"><button disabled={modalSubmitting === 'entry'} type="button" onClick={() => setEntryOpen(false)}>Cancel</button><button className={entryStatus === 'PENDING' ? 'pending-action' : 'success'} disabled={modalSubmitting === 'entry'} onClick={(event) => { if (event.currentTarget.form?.checkValidity()) onPrepareWhatsApp(entryStatus); }} type="submit">{entryStatus === 'PENDING' ? <Clock size={18} /> : <CheckCircle2 size={18} />}{modalSubmitting === 'entry' ? 'Saving...' : entryStatus === 'PENDING' ? 'Save as Pending' : 'Confirm & Generate Slip'}</button></div>
           </form>
         </div>
       )}
 
       {groupOpen && (
         <div className="modal-backdrop">
-          <form className="vargani-modal adhyaksh-modal" onSubmit={async (event) => { await onCreateGroup(event); setGroupOpen(false); }}>
-            <button className="modal-close" onClick={() => setGroupOpen(false)} type="button"><X size={20} /></button>
+          <form className="vargani-modal adhyaksh-modal" onSubmit={async (event) => {
+            setModalSubmitting('group');
+            try {
+              const ok = await onCreateGroup(event);
+              if (ok) setGroupOpen(false);
+            } finally {
+              setModalSubmitting(null);
+            }
+          }}>
+            <button className="modal-close" disabled={modalSubmitting === 'group'} onClick={() => setGroupOpen(false)} type="button"><X size={20} /></button>
             <h2>Add Collection Group</h2>
             <label>Group Name<input name="name" required placeholder="Main Road Team" /></label>
             <label>Area / Locality<input name="areaName" placeholder="Main Road, Lohgaon" /></label>
@@ -2431,8 +2621,8 @@ function AdhyakshApp({
               </select>
             </label>
             <div className="modal-actions">
-              <button type="button" onClick={() => setGroupOpen(false)}>Cancel</button>
-              <button className="blue-action" type="submit">Create Group</button>
+              <button disabled={modalSubmitting === 'group'} type="button" onClick={() => setGroupOpen(false)}>Cancel</button>
+              <button className="blue-action" disabled={modalSubmitting === 'group'} type="submit">{modalSubmitting === 'group' ? 'Creating...' : 'Create Group'}</button>
             </div>
           </form>
         </div>
@@ -2443,16 +2633,22 @@ function AdhyakshApp({
           <form
             className="vargani-modal adhyaksh-modal"
             onSubmit={async (event) => {
-              if (editingTask) {
-                await onEditTask(editingTask, event);
-              } else {
-                await onCreateTask(event);
+              setModalSubmitting('task');
+              try {
+                if (editingTask) {
+                  await onEditTask(editingTask, event);
+                } else {
+                  const ok = await onCreateTask(event);
+                  if (!ok) return;
+                }
+                setTaskOpen(false);
+                setEditingTask(null);
+              } finally {
+                setModalSubmitting(null);
               }
-              setTaskOpen(false);
-              setEditingTask(null);
             }}
           >
-            <button className="modal-close" onClick={() => { setTaskOpen(false); setEditingTask(null); }} type="button"><X size={20} /></button>
+            <button className="modal-close" disabled={modalSubmitting === 'task'} onClick={() => { setTaskOpen(false); setEditingTask(null); }} type="button"><X size={20} /></button>
             <h2>{editingTask ? 'Edit Task' : 'Add Task'}</h2>
             <label>Task Name<input name="title" required defaultValue={editingTask?.title ?? ''} placeholder="Collect pending vargani from Main Road" /></label>
             <label>
@@ -2494,8 +2690,8 @@ function AdhyakshApp({
             </label>
             <label className="full">Notes<textarea name="notes" defaultValue={editingTask?.notes ?? ''} placeholder="What needs to be done, where, and any phone/payment detail." /></label>
             <div className="modal-actions">
-              <button type="button" onClick={() => { setTaskOpen(false); setEditingTask(null); }}>Cancel</button>
-              <button className="blue-action" type="submit">{editingTask ? 'Save Task' : 'Create Task'}</button>
+              <button disabled={modalSubmitting === 'task'} type="button" onClick={() => { setTaskOpen(false); setEditingTask(null); }}>Cancel</button>
+              <button className="blue-action" disabled={modalSubmitting === 'task'} type="submit">{modalSubmitting === 'task' ? 'Saving...' : editingTask ? 'Save Task' : 'Create Task'}</button>
             </div>
           </form>
         </div>
@@ -2503,8 +2699,16 @@ function AdhyakshApp({
 
       {memberOpen && (
         <div className="modal-backdrop">
-          <form className="vargani-modal adhyaksh-modal" onSubmit={(event) => { onCreateMember(event); setMemberOpen(false); }}>
-            <button className="modal-close" onClick={() => setMemberOpen(false)} type="button"><X size={20} /></button>
+          <form className="vargani-modal adhyaksh-modal" onSubmit={async (event) => {
+            setModalSubmitting('member');
+            try {
+              const ok = await onCreateMember(event);
+              if (ok) setMemberOpen(false);
+            } finally {
+              setModalSubmitting(null);
+            }
+          }}>
+            <button className="modal-close" disabled={modalSubmitting === 'member'} onClick={() => setMemberOpen(false)} type="button"><X size={20} /></button>
             <h2>Add Member</h2>
             <p className="modal-help">Create member login here. Make someone a group leader from Collection Groups.</p>
             <label>Name<input name="name" required placeholder="Member name" /></label>
@@ -2513,15 +2717,23 @@ function AdhyakshApp({
             <label>Password<input name="password" required placeholder="Create a strong password" type="password" /></label>
             <label>Group<select name="groupId"><option value="">No group</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
             <label>Area<input name="areaName" placeholder="Market Area" /></label>
-            <div className="modal-actions"><button type="button" onClick={() => setMemberOpen(false)}>Cancel</button><button className="blue-action" type="submit">Create Member Login</button></div>
+            <div className="modal-actions"><button disabled={modalSubmitting === 'member'} type="button" onClick={() => setMemberOpen(false)}>Cancel</button><button className="blue-action" disabled={modalSubmitting === 'member'} type="submit">{modalSubmitting === 'member' ? 'Creating...' : 'Create Member Login'}</button></div>
           </form>
         </div>
       )}
 
       {expenseOpen && (
         <div className="modal-backdrop">
-          <form className="vargani-modal adhyaksh-modal" onSubmit={async (event) => { await onCreateExpense(event); setExpenseOpen(false); }}>
-            <button className="modal-close" onClick={() => setExpenseOpen(false)} type="button"><X size={20} /></button>
+          <form className="vargani-modal adhyaksh-modal" onSubmit={async (event) => {
+            setModalSubmitting('expense');
+            try {
+              const ok = await onCreateExpense(event);
+              if (ok) setExpenseOpen(false);
+            } finally {
+              setModalSubmitting(null);
+            }
+          }}>
+            <button className="modal-close" disabled={modalSubmitting === 'expense'} onClick={() => setExpenseOpen(false)} type="button"><X size={20} /></button>
             <h2>Add Expense</h2>
             <label>Description<input name="description" required placeholder="Expense description" /></label>
             <label>Vendor<input name="vendor" placeholder="Vendor name" /></label>
@@ -2529,7 +2741,7 @@ function AdhyakshApp({
             <label>Category<input name="category" placeholder="Decoration, sound..." /></label>
             <label>Date<input name="date" type="date" /></label>
             <label>Amount<input name="amount" inputMode="numeric" required placeholder="3500" /></label>
-            <div className="modal-actions"><button type="button" onClick={() => setExpenseOpen(false)}>Cancel</button><button className="blue-action" type="submit">Save Expense</button></div>
+            <div className="modal-actions"><button disabled={modalSubmitting === 'expense'} type="button" onClick={() => setExpenseOpen(false)}>Cancel</button><button className="blue-action" disabled={modalSubmitting === 'expense'} type="submit">{modalSubmitting === 'expense' ? 'Saving...' : 'Save Expense'}</button></div>
           </form>
         </div>
       )}
@@ -2604,12 +2816,14 @@ function FormManagementView({
   busy,
   onCreateField,
   onDeleteField,
+  onPrompt,
   onUpdateField,
 }: {
   activeForm: ActiveForm | null;
   busy: boolean;
   onCreateField: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
   onDeleteField: (field: CustomField) => Promise<void> | void;
+  onPrompt: (options: ThemedPromptOptions) => Promise<string | null>;
   onUpdateField: (field: CustomField, patch: Partial<CustomField>) => Promise<void> | void;
 }) {
   const fields = [...(activeForm?.customFields ?? [])].sort((a, b) => a.sortOrder - b.sortOrder);
@@ -2673,8 +2887,12 @@ function FormManagementView({
                 <span>{field.label}</span>
                 <span className="row-actions managed-field-actions">
                   <button
-                    onClick={() => {
-                      const nextLabel = window.prompt('Edit question label', field.label)?.trim();
+                    onClick={async () => {
+                      const nextLabel = (await onPrompt({
+                        defaultValue: field.label,
+                        placeholder: 'Enter question label',
+                        title: 'Edit question label',
+                      }))?.trim();
                       if (nextLabel && nextLabel !== field.label) void onUpdateField(field, { label: nextLabel });
                     }}
                     type="button"
@@ -2742,6 +2960,7 @@ function SuperAdminApp({
   onLanguageChange,
   onLogout,
   onPreviewChange,
+  onPrompt,
   onTemplateSaved,
   session,
   setSidebarOpen,
@@ -2755,6 +2974,7 @@ function SuperAdminApp({
   onLanguageChange: (language: Language) => void;
   onLogout: () => void;
   onPreviewChange: (url: string) => void;
+  onPrompt: (options: ThemedPromptOptions) => Promise<string | null>;
   onTemplateSaved: (
     placements: Record<string, TemplatePlacement>,
     target?: { festivalId?: string; mandalId?: string; previewUrl?: string },
@@ -2967,7 +3187,13 @@ function SuperAdminApp({
       await navigator.clipboard.writeText(text);
       setLoginMessage('Login copied.');
     } catch {
-      window.prompt('Copy login details', text);
+      await onPrompt({
+        confirmLabel: 'Done',
+        defaultValue: text,
+        message: 'Clipboard access is blocked. Select and copy these login details.',
+        multiline: true,
+        title: 'Copy login details',
+      });
     }
   }
 
@@ -3168,6 +3394,7 @@ function SuperAdminApp({
                   latestTemplateVersion={selectedTemplateVersion}
                   onAddField={() => undefined}
                   onPreviewChange={handleOwnerTemplatePreviewChange}
+                  onPrompt={onPrompt}
                   onSaveTemplate={async (placements) => {
                     await onTemplateSaved(placements, {
                       festivalId: selectedMandal.festivals?.[0]?.id,
@@ -3308,9 +3535,11 @@ function MemberCollectorApp({
   onModalChange,
   onPrepareWhatsApp,
   onShareSlip,
+  onTaskDone,
   session,
   setSelectedSlip,
   slips,
+  tasks,
 }: {
   activeForm: ActiveForm | null;
   busy: boolean;
@@ -3318,16 +3547,20 @@ function MemberCollectorApp({
   modalOpen: boolean;
   notice: string;
   onDownloadSlip: (slip: Slip) => Promise<void>;
-  onGenerate: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
+  onGenerate: (event: FormEvent<HTMLFormElement>) => Promise<boolean | void> | boolean | void;
   onLogout: () => void;
   onModalChange: (open: boolean) => void;
   onPrepareWhatsApp: (paymentStatus: 'ACTIVE' | 'PENDING') => void;
   onShareSlip: (slip: Slip) => Promise<void>;
+  onTaskDone: (task: FestivalTask) => Promise<void> | void;
   session: AuthSession;
   setSelectedSlip: (slip: Slip) => void;
   slips: Slip[];
+  tasks: FestivalTask[];
 }) {
   const [entryStatus, setEntryStatus] = useState<'ACTIVE' | 'PENDING'>('ACTIVE');
+  const [activeSection, setActiveSection] = useState<'slips' | 'tasks'>('slips');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [slipFilter, setSlipFilter] = useState<'all' | 'paid' | 'pending'>('all');
   const [slipQuery, setSlipQuery] = useState('');
   const mandalIdentity = getMandalIdentity(mandal, session);
@@ -3349,9 +3582,38 @@ function MemberCollectorApp({
   });
   const collected = paidSlipRows.reduce((sum, slip) => sum + Number(slip.amount), 0);
   const paidSlips = paidSlipRows.length;
+  const openTasks = tasks.filter((task) => task.status !== 'DONE' && task.status !== 'CANCELLED');
+  const doneTasks = tasks.filter((task) => task.status === 'DONE');
+  const roleLabel = session.user.role === 'GROUP_LEADER' ? 'Group Leader' : 'Collection Member';
+
+  function openMemberSection(section: 'slips' | 'tasks') {
+    setActiveSection(section);
+    window.scrollTo({ behavior: 'smooth', top: 0 });
+    setSidebarOpen(false);
+  }
 
   return (
-    <main className="member-shell">
+    <main className={`member-shell collector-shell ${sidebarOpen ? 'sidebar-open' : ''}`}>
+      <div className="mobile-workspace-bar">
+        <div className="mobile-workspace-brand">
+          {mandalIdentity.logoUrl ? <img alt="" src={mandalIdentity.logoUrl} /> : <span>{mandalIdentity.initials}</span>}
+          <div>
+            <strong>{mandalIdentity.name}</strong>
+            <small>{mandalIdentity.location}</small>
+          </div>
+        </div>
+        <button
+          aria-label={sidebarOpen ? 'Close menu' : 'Open menu'}
+          className="mobile-menu-toggle"
+          onClick={() => setSidebarOpen((open) => !open)}
+          type="button"
+        >
+          {sidebarOpen ? <X size={28} /> : <Menu size={28} />}
+        </button>
+      </div>
+
+      {sidebarOpen && <button aria-label="Close menu" className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} type="button" />}
+
       <aside className="member-sidebar">
         <div className="mandal-profile">
           {mandalIdentity.logoUrl ? <img alt="" className="mandal-avatar-img" src={mandalIdentity.logoUrl} /> : <div className="mandal-logo">{mandalIdentity.initials}</div>}
@@ -3365,9 +3627,13 @@ function MemberCollectorApp({
           <span>{mandalIdentity.phone}</span>
         </div>
         <nav className="member-nav">
-          <button className="active" type="button">
+          <button className={activeSection === 'slips' ? 'active' : ''} onClick={() => openMemberSection('slips')} type="button">
             <ReceiptText size={20} />
             Vargani Slips
+          </button>
+          <button className={activeSection === 'tasks' ? 'active' : ''} onClick={() => openMemberSection('tasks')} type="button">
+            <ShieldCheck size={20} />
+            Assigned Tasks
           </button>
         </nav>
         <div className="sidebar-footer">
@@ -3375,7 +3641,7 @@ function MemberCollectorApp({
             <span>{session.user.name.charAt(0)}</span>
             <div>
               <strong>{session.user.name}</strong>
-              <small>{session.user.role === 'GROUP_LEADER' ? 'Group Leader' : 'Collection Member'}</small>
+              <small>{roleLabel}</small>
             </div>
           </div>
           <button className="logout" onClick={onLogout} type="button">
@@ -3388,93 +3654,146 @@ function MemberCollectorApp({
       <section className="member-content">
         <header className="member-header">
           <div>
-            <h1>Vargani Slips</h1>
-            <p>{activeForm?.festival.name ?? 'Active Festival'}</p>
+            <h1>{activeSection === 'tasks' ? 'Assigned Tasks' : 'Vargani Slips'}</h1>
+            <p>{activeForm?.festival.name ?? 'Active Festival'} · {roleLabel}</p>
           </div>
           <select defaultValue="2026" aria-label="Active year">
             <option value="2026">Year 2026</option>
           </select>
         </header>
 
-        <section className="member-hero">
-          <div>
-            <h2>Vargani Slips</h2>
-            <p>Generate and manage your vargani receipts</p>
-          </div>
-          <button className="primary" onClick={() => onModalChange(true)} type="button">
-            <Plus size={18} />
-            New Vargani Entry
-          </button>
-        </section>
-
-        <div className={`notice ${busy ? 'busy' : ''}`}>{busy ? 'Working...' : notice}</div>
-
-        <section className="member-stats">
-          <Stat icon={<ReceiptText />} label="Total Entries" note="Your slips" value={String(slips.length)} />
-          <Stat icon={<BadgeIndianRupee />} label="Collected" note={`${paidSlips} paid`} value={money(collected)} />
-          <Stat icon={<CheckCircle2 />} label="Paid Slips" note="Generated receipts" value={String(paidSlips)} />
-          <Stat icon={<FileText />} label="Pending Slips" note="No slip until paid" value={String(pendingSlipRows.length)} />
-        </section>
-
-        <section className="member-table-card">
-          <div className="table-toolbar">
-            <div className="tab-strip">
-              <button className={slipFilter === 'all' ? 'active' : ''} onClick={() => setSlipFilter('all')} type="button">All ({slips.length})</button>
-              <button className={slipFilter === 'paid' ? 'active' : ''} onClick={() => setSlipFilter('paid')} type="button">Paid ({paidSlips})</button>
-              <button className={slipFilter === 'pending' ? 'active' : ''} onClick={() => setSlipFilter('pending')} type="button">Pending ({pendingSlipRows.length})</button>
-            </div>
-            <div className="search-box"><Search size={18} /><input onChange={(event) => setSlipQuery(event.target.value)} placeholder="Search by name, shop, location..." value={slipQuery} /></div>
-          </div>
-          <div className="member-slip-table">
-            <div className="member-slip-head">
-              <span>Slip #</span><span>Name / Shop</span><span>Amount</span><span>Mobile</span><span>Status / Mode</span><span>Date</span><span>Actions</span>
-            </div>
-            {filteredSlipRows.map((slip) => (
-              <div
-                className="member-slip-row"
-                key={slip.id}
-                onClick={() => setSelectedSlip(slip)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') setSelectedSlip(slip);
-                }}
-                role="button"
-                tabIndex={0}
-              >
-                <strong>{slip.slipNumber}</strong>
-                <span>{slip.contributorName}<small>{slip.shopName || slip.areaName || '-'}</small></span>
-                <b>{money(Number(slip.amount))}</b>
-                <span>{slip.contributorPhone || '-'}</span>
-                <em>{isSlipPaid(slip) ? 'Paid' : 'Pending'} - {slip.paymentMode}</em>
-                <span>{new Date(slip.createdAt).toLocaleDateString('en-IN')}</span>
-                <span className="row-actions" style={{ display: 'flex', gap: '6px' }}>
-                  <button
-                    className="mini-link"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setSelectedSlip(slip);
-                      void onDownloadSlip(slip);
-                    }}
-                    type="button"
-                  >
-                    <Download size={15} /> Slip
-                  </button>
-                  <button
-                    className="mini-link"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setSelectedSlip(slip);
-                      void onShareSlip(slip);
-                    }}
-                    type="button"
-                  >
-                    <Share2 size={15} /> Share
-                  </button>
-                </span>
+        {activeSection === 'slips' ? (
+          <>
+            <section className="member-hero" id="member-slips">
+              <div>
+                <h2>Vargani Slips</h2>
+                <p>Generate and manage your vargani receipts</p>
               </div>
-            ))}
-            {filteredSlipRows.length === 0 && <div className="empty-state">No slips found for this filter.</div>}
-          </div>
-        </section>
+              <button className="primary" onClick={() => onModalChange(true)} type="button">
+                <Plus size={18} />
+                New Vargani Entry
+              </button>
+            </section>
+
+            {(busy || notice) && <div className={`notice ${busy ? 'busy' : ''}`}>{busy ? 'Working...' : notice}</div>}
+
+            <section className="member-stats">
+              <Stat icon={<ReceiptText />} label="Total Entries" note="Your slips" value={String(slips.length)} />
+              <Stat icon={<BadgeIndianRupee />} label="Collected" note={`${paidSlips} paid`} value={money(collected)} />
+              <Stat icon={<CheckCircle2 />} label="Paid Slips" note="Generated receipts" value={String(paidSlips)} />
+              <Stat icon={<FileText />} label="Pending Slips" note="No slip until paid" value={String(pendingSlipRows.length)} />
+            </section>
+
+            <section className="member-table-card">
+              <div className="table-toolbar">
+                <div className="tab-strip">
+                  <button className={slipFilter === 'all' ? 'active' : ''} onClick={() => setSlipFilter('all')} type="button">All ({slips.length})</button>
+                  <button className={slipFilter === 'paid' ? 'active' : ''} onClick={() => setSlipFilter('paid')} type="button">Paid ({paidSlips})</button>
+                  <button className={slipFilter === 'pending' ? 'active' : ''} onClick={() => setSlipFilter('pending')} type="button">Pending ({pendingSlipRows.length})</button>
+                </div>
+                <div className="search-box"><Search size={18} /><input onChange={(event) => setSlipQuery(event.target.value)} placeholder="Search by name, shop, location..." value={slipQuery} /></div>
+              </div>
+              <div className="member-slip-table">
+                <div className="member-slip-head">
+                  <span>Slip #</span><span>Name / Shop</span><span>Amount</span><span>Mobile</span><span>Status / Mode</span><span>Date</span><span>Actions</span>
+                </div>
+                {filteredSlipRows.map((slip) => (
+                  <div
+                    className="member-slip-row"
+                    key={slip.id}
+                    onClick={() => setSelectedSlip(slip)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') setSelectedSlip(slip);
+                    }}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <strong>{slip.slipNumber}</strong>
+                    <span>{slip.contributorName}<small>{slip.shopName || slip.areaName || '-'}</small></span>
+                    <b>{money(Number(slip.amount))}</b>
+                    <span>{slip.contributorPhone || '-'}</span>
+                    <em>{isSlipPaid(slip) ? 'Paid' : 'Pending'} - {slip.paymentMode}</em>
+                    <span>{new Date(slip.createdAt).toLocaleDateString('en-IN')}</span>
+                    <span className="row-actions" style={{ display: 'flex', gap: '6px' }}>
+                      <button
+                        className="mini-link"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setSelectedSlip(slip);
+                          void onDownloadSlip(slip);
+                        }}
+                        type="button"
+                      >
+                        <Download size={15} /> Slip
+                      </button>
+                      <button
+                        className="mini-link"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setSelectedSlip(slip);
+                          void onShareSlip(slip);
+                        }}
+                        type="button"
+                      >
+                        <Share2 size={15} /> Share
+                      </button>
+                    </span>
+                  </div>
+                ))}
+                {filteredSlipRows.length === 0 && <div className="empty-state">No slips found for this filter.</div>}
+              </div>
+            </section>
+          </>
+        ) : (
+          <>
+            <section className="member-hero" id="member-tasks">
+              <div>
+                <h2>Assigned Tasks</h2>
+                <p>Work assigned to you or your collection group</p>
+              </div>
+              <span className="member-hero-count">{openTasks.length} open</span>
+            </section>
+
+            {(busy || notice) && <div className={`notice ${busy ? 'busy' : ''}`}>{busy ? 'Working...' : notice}</div>}
+
+            <section className="member-stats">
+              <Stat icon={<ShieldCheck />} label="Open Tasks" note="Need action" value={String(openTasks.length)} />
+              <Stat icon={<CheckCircle2 />} label="Completed" note="Marked done" value={String(doneTasks.length)} />
+              <Stat icon={<ClipboardList />} label="Total Tasks" note="Assigned work" value={String(tasks.length)} />
+            </section>
+
+            <section className="member-task-card">
+              <div className="member-section-title">
+                <div>
+                  <h2>Task List</h2>
+                  <p>Complete work once it is actually finished.</p>
+                </div>
+                <span>{openTasks.length} open</span>
+              </div>
+              <div className="member-task-list">
+                {tasks.length === 0 && <div className="empty-state">No tasks assigned yet.</div>}
+                {tasks.map((task) => (
+                  <article className={`member-task-item ${task.status === 'DONE' ? 'done' : ''}`} key={task.id}>
+                    <div>
+                      <strong>{task.title}</strong>
+                      <small>{task.notes || 'No notes added'}</small>
+                      <span>{task.assignee?.name ? `Assigned to ${task.assignee.name}` : 'Group task'}{task.group?.name ? ` · ${task.group.name}` : ''}</span>
+                    </div>
+                    <div className="member-task-meta">
+                      <i className={task.status === 'DONE' ? 'pill paid' : 'pill pending'}>{task.status.replaceAll('_', ' ')}</i>
+                      <i className="pill mode">{task.priority}</i>
+                      <small>{task.dueDate?.slice(0, 10) ?? 'No due date'}</small>
+                    </div>
+                    <button disabled={busy || task.status === 'DONE'} onClick={() => void onTaskDone(task)} type="button">
+                      <CheckCircle2 size={17} />
+                      {task.status === 'DONE' ? 'Done' : 'Mark Done'}
+                    </button>
+                  </article>
+                ))}
+              </div>
+            </section>
+          </>
+        )}
       </section>
 
       {modalOpen && (
@@ -3482,7 +3801,8 @@ function MemberCollectorApp({
           <form
             className="vargani-modal"
             onSubmit={async (event) => {
-              await onGenerate(event);
+              const ok = await onGenerate(event);
+              if (ok === false) return;
               onModalChange(false);
               setEntryStatus('ACTIVE');
             }}
@@ -3523,6 +3843,68 @@ function MemberCollectorApp({
         </div>
       )}
     </main>
+  );
+}
+
+function ThemedDialogModal({
+  dialog,
+  onClose,
+}: {
+  dialog: ThemedDialogRequest;
+  onClose: (value?: boolean | string | null) => void;
+}) {
+  const [value, setValue] = useState(dialog.type === 'prompt' ? dialog.defaultValue ?? '' : '');
+
+  useEffect(() => {
+    setValue(dialog.type === 'prompt' ? dialog.defaultValue ?? '' : '');
+  }, [dialog]);
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onClose(dialog.type === 'prompt' ? value : true);
+  }
+
+  return (
+    <div className="themed-dialog-backdrop" role="presentation">
+      <form aria-modal="true" className={`themed-dialog ${dialog.danger ? 'danger' : ''}`} onSubmit={submit} role="dialog">
+        <div className="themed-dialog-icon">
+          {dialog.danger ? <Trash2 size={24} /> : dialog.type === 'prompt' ? <Edit3 size={24} /> : <ShieldCheck size={24} />}
+        </div>
+        <div className="themed-dialog-copy">
+          <strong>{dialog.title}</strong>
+          {dialog.message && <p>{dialog.message}</p>}
+        </div>
+        {dialog.type === 'prompt' && (
+          <label className="themed-dialog-input">
+            {dialog.multiline ? (
+              <textarea
+                autoFocus
+                onFocus={(event) => event.currentTarget.select()}
+                onChange={(event) => setValue(event.target.value)}
+                placeholder={dialog.placeholder}
+                value={value}
+              />
+            ) : (
+              <input
+                autoFocus
+                onFocus={(event) => event.currentTarget.select()}
+                onChange={(event) => setValue(event.target.value)}
+                placeholder={dialog.placeholder}
+                value={value}
+              />
+            )}
+          </label>
+        )}
+        <div className="themed-dialog-actions">
+          <button onClick={() => onClose(dialog.type === 'confirm' ? false : null)} type="button">
+            {dialog.cancelLabel ?? 'Cancel'}
+          </button>
+          <button className={dialog.danger ? 'danger-action' : 'primary'} type="submit">
+            {dialog.confirmLabel ?? (dialog.type === 'confirm' ? 'Confirm' : 'Save')}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -4128,6 +4510,7 @@ function TemplateView({
   latestTemplateVersion,
   onAddField,
   onPreviewChange,
+  onPrompt,
   onSaveTemplate,
   templatePreview,
 }: {
@@ -4137,6 +4520,7 @@ function TemplateView({
   latestTemplateVersion?: Template['versions'][number];
   onAddField: (label: string, required?: boolean) => void;
   onPreviewChange: (url: string) => void;
+  onPrompt: (options: ThemedPromptOptions) => Promise<string | null>;
   onSaveTemplate?: (placements: Record<string, TemplatePlacement>) => Promise<void> | void;
   templatePreview: string;
 }) {
@@ -4682,16 +5066,22 @@ function TemplateView({
 
                 <button
                   className="menu-item"
-                  onClick={() => {
+                  onClick={async () => {
                     const current = placements[contextMenu.fieldKey] ?? defaultPlacement();
-                    const input = window.prompt('Enter X, Y coordinates (e.g. 720, 680):', `${current.x}, ${current.y}`);
+                    const fieldKey = contextMenu.fieldKey;
+                    setContextMenu(null);
+                    const input = await onPrompt({
+                      defaultValue: `${current.x}, ${current.y}`,
+                      message: 'Enter X and Y coordinates separated by comma.',
+                      placeholder: '720, 680',
+                      title: 'Set text axis',
+                    });
                     if (input) {
                       const [x, y] = input.split(',').map((val) => parseInt(val.trim(), 10));
                       if (!isNaN(x) && !isNaN(y)) {
-                        updatePlacement(contextMenu.fieldKey, { x, y });
+                        updatePlacement(fieldKey, { x, y });
                       }
                     }
-                    setContextMenu(null);
                   }}
                   type="button"
                 >
