@@ -1175,9 +1175,26 @@ kbd {
   color: #009b47;
 }
 
-.owner-client-card > button {
+.mandal-card-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr auto;
+}
+
+.mandal-card-actions button {
   justify-content: center;
   min-height: 42px;
+}
+
+.mandal-card-actions .danger {
+  background: #fff5f0;
+  border-color: #ffc8ad;
+  color: var(--orange-dark);
+}
+
+.mandal-card-actions .danger:hover {
+  background: #ffe8dc;
+  border-color: #fb923c;
 }
 
 .owner-add-panel {
@@ -4565,7 +4582,7 @@ nav button.active svg,
 .table-toolbar button,
 .table-toolbar a,
 .mandal-card > button,
-.owner-client-card > button,
+.mandal-card-actions button,
 .app-topbar > button {
   background: var(--panel);
   border-color: var(--line);
@@ -4578,7 +4595,7 @@ nav button.active svg,
 .header-actions button:hover,
 .toolbar button:hover,
 .table-toolbar button:hover,
-.owner-client-card > button:hover,
+.mandal-card-actions button:hover,
 .app-topbar > button:hover {
   background: #f4f8f5;
   border-color: #bad8c7;
@@ -5155,7 +5172,7 @@ nav button.active svg,
 .header-actions button:hover,
 .toolbar button:hover,
 .table-toolbar button:hover,
-.owner-client-card > button:hover,
+.mandal-card-actions button:hover,
 .app-topbar > button:hover {
   background: #fff7ed;
   border-color: #fdba74;
@@ -6399,7 +6416,7 @@ nav button.active svg,
 .table-toolbar button,
 .table-toolbar a,
 .mandal-card > button,
-.owner-client-card > button,
+.mandal-card-actions button,
 .app-topbar > button {
   background: #fff;
   border-color: #e6e9ef;
@@ -6413,7 +6430,7 @@ nav button.active svg,
 .header-actions button:hover,
 .toolbar button:hover,
 .table-toolbar button:hover,
-.owner-client-card > button:hover,
+.mandal-card-actions button:hover,
 .app-topbar > button:hover {
   background: #fff7ed;
   border-color: #fdba74;
