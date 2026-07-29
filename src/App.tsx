@@ -387,7 +387,7 @@ export default function App() {
   const [templatePreview, setTemplatePreview] = useState<string>(TEMPLATE_IMAGE);
 
   const handlePreviewChange = useCallback((url: string) => {
-    setTemplatePreview(url);
+    setTemplatePreview(resolveTemplateAssetUrl(url));
   }, []);
   const [notice, setNotice] = useState('Login with main mandal admin to open the console.');
   const [authReady, setAuthReady] = useState(false);
@@ -526,7 +526,7 @@ export default function App() {
 
   async function persistTemplatePreview(targetMandalId: string, targetFestivalId: string, previewOverride?: string) {
     const preview = previewOverride || templatePreview || TEMPLATE_IMAGE;
-    if (!preview.startsWith('data:')) return preview;
+    if (!preview.startsWith('data:')) return resolveTemplateAssetUrl(preview);
 
     const asset = await apiRequest<TemplateAssetUpload>(
       `/mandals/${targetMandalId}/festivals/${targetFestivalId}/templates/assets`,
@@ -665,7 +665,7 @@ export default function App() {
     setReport(payload.report);
     setSelectedSlip(nextSlips[0] ?? null);
     const activeVersion = findActiveTemplateVersion(payload.templates);
-    setTemplatePreview(activeVersion?.backgroundFileUrl || TEMPLATE_IMAGE);
+    setTemplatePreview(resolveTemplateAssetUrl(activeVersion?.backgroundFileUrl || TEMPLATE_IMAGE));
     setDemoMandals([]);
     setWorkspaceLoaded(true);
   }
@@ -981,7 +981,7 @@ export default function App() {
     try {
       let placements: Record<string, TemplatePlacement> =
         normalizeTemplatePlacements(latestTemplateVersion?.renderConfig?.fields);
-      let bgUrl = latestTemplateVersion?.backgroundFileUrl || templatePreview || TEMPLATE_IMAGE;
+      let bgUrl = resolveTemplateAssetUrl(latestTemplateVersion?.backgroundFileUrl || templatePreview || TEMPLATE_IMAGE);
 
       if (Object.keys(placements).length === 0) {
         placements = {
@@ -2608,7 +2608,9 @@ function SuperAdminApp({
   const selectedKey = selectedMandal?.id ?? selectedMandal?.name ?? '';
   const extraLogins = mandalLogins[selectedKey] ?? [];
   const selectedTemplateVersion = selectedMandal?.festivals?.[0]?.templates?.[0]?.versions?.[0];
-  const selectedTemplatePreview = (selectedKey && ownerTemplateDrafts[selectedKey]) || selectedTemplateVersion?.backgroundFileUrl || TEMPLATE_IMAGE;
+  const selectedTemplatePreview = resolveTemplateAssetUrl(
+    (selectedKey && ownerTemplateDrafts[selectedKey]) || selectedTemplateVersion?.backgroundFileUrl || TEMPLATE_IMAGE,
+  );
   const adminUser = selectedMandal?.users?.find((user) => user.role === 'MANDAL_ADMIN');
   const persistedLogins =
     selectedMandal?.users
@@ -2716,12 +2718,13 @@ function SuperAdminApp({
   }
 
   function handleOwnerTemplatePreviewChange(url: string) {
+    const resolvedUrl = resolveTemplateAssetUrl(url);
     if (!selectedKey) {
-      onPreviewChange(url);
+      onPreviewChange(resolvedUrl);
       return;
     }
-    setOwnerTemplateDrafts((current) => ({ ...current, [selectedKey]: url }));
-    onPreviewChange(url);
+    setOwnerTemplateDrafts((current) => ({ ...current, [selectedKey]: resolvedUrl }));
+    onPreviewChange(resolvedUrl);
   }
 
   async function createLogin(event: FormEvent<HTMLFormElement>) {
@@ -4130,7 +4133,7 @@ function TemplateView({
       setPlacements(backendPlacements);
     }
     if (latestTemplateBackground) {
-      onPreviewChange(latestTemplateBackground);
+      onPreviewChange(resolveTemplateAssetUrl(latestTemplateBackground));
     }
   }, [latestTemplateBackground, latestTemplateFields, latestTemplateVersion?.id, onPreviewChange]);
 
@@ -5119,6 +5122,25 @@ function fileToDataUrl(file: File) {
 function absoluteAppUrl(pathOrUrl: string) {
   if (/^https?:\/\//.test(pathOrUrl)) return pathOrUrl;
   return new URL(pathOrUrl, window.location.origin).toString();
+}
+
+function resolveTemplateAssetUrl(pathOrUrl: string) {
+  const value = pathOrUrl?.trim() || TEMPLATE_IMAGE;
+  if (value.startsWith('data:')) return value;
+  if (!/^https?:\/\//.test(value)) return absoluteAppUrl(value);
+
+  try {
+    const url = new URL(value);
+    const isLocalTemplateAsset =
+      ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname.startsWith('/templates/');
+    if (isLocalTemplateAsset) {
+      return new URL(`${url.pathname}${url.search}`, window.location.origin).toString();
+    }
+  } catch {
+    return value;
+  }
+
+  return value;
 }
 
 function mandalLoginUrl() {
