@@ -1524,7 +1524,9 @@ export default function App() {
     return <AuthLoadingScreen detail="Opening your workspace..." />;
   }
 
-  if (session?.user.role === 'MEMBER') {
+  const isCollectorRole = session?.user.role === 'MEMBER' || session?.user.role === 'GROUP_LEADER';
+
+  if (isCollectorRole) {
     return withActionOverlay(
       <MemberCollectorApp
         activeForm={activeForm}
@@ -3320,7 +3322,7 @@ function MemberCollectorApp({
             <span>{session.user.name.charAt(0)}</span>
             <div>
               <strong>{session.user.name}</strong>
-              <small>Collection Member</small>
+              <small>{session.user.role === 'GROUP_LEADER' ? 'Group Leader' : 'Collection Member'}</small>
             </div>
           </div>
           <button className="logout" onClick={onLogout} type="button">
