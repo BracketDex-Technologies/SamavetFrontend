@@ -136,6 +136,10 @@ interface Group {
   _count?: { members: number; slips: number };
 }
 
+function getMemberUserId(member: Member) {
+  return member.user?.id ?? member.userId ?? '';
+}
+
 interface Slip {
   id: string;
   amount: string | number;
@@ -823,7 +827,7 @@ export default function App() {
             name: String(form.get('name') || ''),
             password,
             phone: String(form.get('phone') || ''),
-            role: String(form.get('role') || 'MEMBER') as UserRole,
+            role: 'MEMBER' satisfies UserRole,
           }),
           method: 'POST',
         },
@@ -1418,6 +1422,35 @@ export default function App() {
     }
   }
 
+  async function assignMemberGroup(member: Member, groupId: string) {
+    if (!session || !mandalId || !festivalId) return;
+    const userId = getMemberUserId(member);
+    const isOrphanLeader = member.user?.role === 'GROUP_LEADER' && !groups.some((group) => group.leader?.id === userId);
+    startBusy('Assigning group...');
+    try {
+      await apiRequest(
+        `/mandals/${mandalId}/festivals/${festivalId}/members/${member.id}`,
+        {
+          body: JSON.stringify({
+            areaName: member.areaName ?? '',
+            groupId: groupId || null,
+            name: member.displayName,
+            phone: member.phone ?? member.user?.phone ?? '',
+            role: isOrphanLeader ? 'MEMBER' : member.user?.role ?? 'MEMBER',
+          }),
+          method: 'PATCH',
+        },
+        session,
+      );
+      await loadWorkspace(session);
+      setNotice(isOrphanLeader ? 'Member assigned to group and old orphan leader role cleaned.' : 'Member group updated.');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not update member group.');
+    } finally {
+      stopBusy();
+    }
+  }
+
   async function archiveMember(member: Member) {
     if (!session || !mandalId || !festivalId || !window.confirm(`Archive ${member.displayName}?`)) return;
     startBusy('Archiving member...');
@@ -1580,6 +1613,7 @@ export default function App() {
       mandal={currentMandal}
       notice={notice}
       onArchiveMember={archiveMember}
+      onAssignMemberGroup={assignMemberGroup}
       onCancelSlip={cancelSlip}
       onCreateMember={createMember}
       onCreateExpense={createExpense}
@@ -1759,6 +1793,7 @@ function AdhyakshApp({
   members,
   notice,
   onArchiveMember,
+  onAssignMemberGroup,
   onCancelSlip,
   onCreateMember,
   onCreateExpense,
@@ -1807,6 +1842,7 @@ function AdhyakshApp({
   members: Member[];
   notice: string;
   onArchiveMember: (member: Member) => Promise<void> | void;
+  onAssignMemberGroup: (member: Member, groupId: string) => Promise<void> | void;
   onCancelSlip: (slip: Slip) => Promise<void> | void;
   onCreateMember: (event: FormEvent<HTMLFormElement>) => void;
   onCreateExpense: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
@@ -1862,7 +1898,7 @@ function AdhyakshApp({
   const filteredSlipRows =
     slipFilter === 'paid' ? paidSlipRows : slipFilter === 'pending' ? pendingSlipRows : slipRows;
   const totalSlipCollection = paidSlipRows.reduce((sum, slip) => sum + Number(slip.amount || 0), 0);
-  const memberUserId = (member: Member) => member.user?.id ?? member.userId ?? '';
+  const memberUserId = getMemberUserId;
   const collectionByUser = new Map<string, number>();
   const collectionByGroup = new Map<string, number>();
   paidSlipRows.forEach((slip) => {
@@ -1879,14 +1915,20 @@ function AdhyakshApp({
     const memberSlips = slipRows.filter((slip) => phone && normalizeIndianPhone(slip.contributorPhone) === normalizeIndianPhone(phone));
     const vargani = memberSlips.filter(isSlipPaid).reduce((sum, slip) => sum + Number(slip.amount || 0), 0);
     const userId = memberUserId(member);
+    const ledGroup = groups.find((group) => group.leader?.id === userId);
+    const isLeader = Boolean(ledGroup);
+    const isOrphanLeader = member.user?.role === 'GROUP_LEADER' && !ledGroup;
     return {
       collected: Number(member.collectionTotal ?? collectionByUser.get(userId) ?? 0),
       contact: phone || '-',
-      groupName: member.group?.name ?? 'No group',
+      groupName: member.group?.name ?? (isOrphanLeader ? 'Needs group assignment' : 'No group'),
+      isLeader,
+      isOrphanLeader,
       member,
       name: member.displayName,
       paidSlipCount: Number(member.paidSlipCount ?? 0),
       paid: vargani > 0,
+      rawGroupId: member.group?.id ?? member.groupId ?? '',
       role: member.user?.role.replaceAll('_', ' ') ?? 'Member',
       vargani,
     };
@@ -1899,11 +1941,13 @@ function AdhyakshApp({
   });
   const groupsWithStats = groups.map((group) => {
     const rows = memberRowsByGroup.get(group.id) ?? [];
+    const leaderRow = group.leader?.id ? memberRows.find((row) => memberUserId(row.member) === group.leader?.id) : undefined;
+    const memberRowsForGroup = leaderRow && !rows.some((row) => row.member.id === leaderRow.member.id) ? [leaderRow, ...rows] : rows;
     return {
       ...group,
       collected: Number(group.collectionTotal ?? collectionByGroup.get(group.id) ?? 0),
-      memberRows: rows,
-      memberCount: rows.length || group._count?.members || group.members?.length || 0,
+      memberRows: memberRowsForGroup,
+      memberCount: memberRowsForGroup.length || group._count?.members || group.members?.length || 0,
       slipCount: Number(group.paidSlipCount ?? group._count?.slips ?? 0),
     };
   });
@@ -2108,7 +2152,7 @@ function AdhyakshApp({
                       {group.memberRows.length === 0 && <small>No members linked yet.</small>}
                       {group.memberRows.slice(0, 5).map((row) => (
                         <small key={row.member.id}>
-                          <span>{row.name}</span>
+                          <span>{row.name}{row.isLeader && <em className="leader-badge">Leader</em>}</span>
                           <b>{money(row.collected)}</b>
                         </small>
                       ))}
@@ -2119,15 +2163,24 @@ function AdhyakshApp({
               </div>
             </div>
             <div className="ops-table members-table">
-              <div className="ops-head members-head"><span>Name & Role</span><span>Group</span><span>Contact</span><span>Collected</span><span>Vargani (2026)</span><span>Actions</span></div>
+              <div className="ops-head members-head"><span>Name & Role</span><span>Group</span><span>Contact</span><span>Collected by user</span><span>Vargani (2026)</span><span>Actions</span></div>
               {isInitialSync && <EmptyTableState message="Loading live member data..." />}
               {workspaceLoaded && memberRows.length === 0 && <EmptyTableState message="No members added yet." />}
               {memberRows.map((member) => (
                 <div className="ops-row member-row" key={member.member.id}>
                   <strong>{member.name}<small>{member.role}</small></strong>
-                  <span className={member.groupName === 'No group' ? 'muted-cell' : ''}>{member.groupName}</span>
+                  <label className={`member-group-control ${member.isOrphanLeader ? 'needs-group' : member.rawGroupId ? '' : 'no-group'}`}>
+                    <select
+                      value={member.rawGroupId}
+                      onChange={(event) => void onAssignMemberGroup(member.member, event.target.value)}
+                    >
+                      <option value="">No group</option>
+                      {groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                    </select>
+                    {member.isOrphanLeader && <small>Leader role without a group</small>}
+                  </label>
                   <span>{member.contact}</span>
-                  <span><b>{money(member.collected)}</b><small>{member.paidSlipCount} slips</small></span>
+                  <span><b>{money(member.collected)}</b><small>{member.paidSlipCount} slips collected</small></span>
                   <span><b>{money(member.vargani)}</b><i className={member.paid ? 'pill paid' : 'pill pending'}>{member.paid ? 'Paid' : 'Pending'}</i></span>
                   <span className="row-actions">
                     <button onClick={() => void onEditMember(member.member)} type="button"><Edit3 size={16} /></button>
@@ -2453,11 +2506,11 @@ function AdhyakshApp({
           <form className="vargani-modal adhyaksh-modal" onSubmit={(event) => { onCreateMember(event); setMemberOpen(false); }}>
             <button className="modal-close" onClick={() => setMemberOpen(false)} type="button"><X size={20} /></button>
             <h2>Add Member</h2>
+            <p className="modal-help">Create member login here. Make someone a group leader from Collection Groups.</p>
             <label>Name<input name="name" required placeholder="Member name" /></label>
             <label>Email<input name="email" required placeholder="member@mandal.local" /></label>
             <label>Phone<input name="phone" placeholder="+91..." /></label>
             <label>Password<input name="password" required placeholder="Create a strong password" type="password" /></label>
-            <label>Role<select name="role" defaultValue="MEMBER"><option value="KHAJINDAR">Khajindar</option><option value="GROUP_LEADER">Group Leader</option><option value="MEMBER">Member</option></select></label>
             <label>Group<select name="groupId"><option value="">No group</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
             <label>Area<input name="areaName" placeholder="Market Area" /></label>
             <div className="modal-actions"><button type="button" onClick={() => setMemberOpen(false)}>Cancel</button><button className="blue-action" type="submit">Create Member Login</button></div>
