@@ -113,19 +113,26 @@ interface Festival {
 }
 
 interface Member {
+  collectionTotal?: number | string | null;
   id: string;
   areaName?: string | null;
   displayName: string;
+  paidSlipCount?: number;
   phone?: string | null;
   group?: { id: string; name: string; areaName?: string | null } | null;
+  groupId?: string | null;
   user?: { email?: string | null; id?: string; name: string; phone?: string | null; role: UserRole; status: string };
+  userId?: string | null;
 }
 
 interface Group {
+  collectionTotal?: number | string | null;
   id: string;
   areaName?: string | null;
   name: string;
   leader?: { id?: string; name: string; phone?: string | null } | null;
+  members?: Member[];
+  paidSlipCount?: number;
   _count?: { members: number; slips: number };
 }
 
@@ -140,6 +147,7 @@ interface Slip {
   collectedByUserId?: string | null;
   createdAt: string;
   customData?: Record<string, string>;
+  groupId?: string | null;
   paymentMode: PaymentMode;
   shopName?: string | null;
   slipNumber: string;
@@ -950,6 +958,7 @@ export default function App() {
             contributorName: String(form.get('contributorName')),
             contributorPhone,
             customData,
+            groupId: String(form.get('groupId') || '') || undefined,
             idempotencyKey: crypto.randomUUID(),
             paymentMode: String(form.get('paymentMode')) as PaymentMode,
             shopName: String(form.get('shopName')),
@@ -1284,6 +1293,27 @@ export default function App() {
     }
   }
 
+  async function updateGroup(groupId: string, patch: { areaName?: string | null; leaderUserId?: string | null; name?: string }) {
+    if (!session || !mandalId || !festivalId) return;
+    startBusy('Saving group...');
+    try {
+      await apiRequest(
+        `/mandals/${mandalId}/festivals/${festivalId}/groups/${groupId}`,
+        {
+          body: JSON.stringify(patch),
+          method: 'PATCH',
+        },
+        session,
+      );
+      await loadWorkspace(session);
+      setNotice('Group updated.');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not update group.');
+    } finally {
+      stopBusy();
+    }
+  }
+
   async function createTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!session || !mandalId || !festivalId) return;
@@ -1570,6 +1600,7 @@ export default function App() {
       onTemplateSaved={(placements) => saveTemplateConfig(placements)}
       onTaskDone={(task) => updateTask(task, { status: 'DONE' })}
       onUpdateCustomField={updateCustomField}
+      onUpdateGroup={updateGroup}
       query={query}
       report={report}
       session={session}
@@ -1750,6 +1781,7 @@ function AdhyakshApp({
   onTemplateSaved,
   onTaskDone,
   onUpdateCustomField,
+  onUpdateGroup,
   query,
   report,
   session,
@@ -1797,6 +1829,7 @@ function AdhyakshApp({
   onTemplateSaved: (placements: Record<string, TemplatePlacement>) => Promise<void> | void;
   onTaskDone: (task: FestivalTask) => Promise<void> | void;
   onUpdateCustomField: (field: CustomField, patch: Partial<CustomField>) => Promise<void> | void;
+  onUpdateGroup: (groupId: string, patch: { areaName?: string | null; leaderUserId?: string | null; name?: string }) => Promise<void> | void;
   query: string;
   report: CollectionReport | null;
   session: AuthSession;
@@ -1827,17 +1860,49 @@ function AdhyakshApp({
   const filteredSlipRows =
     slipFilter === 'paid' ? paidSlipRows : slipFilter === 'pending' ? pendingSlipRows : slipRows;
   const totalSlipCollection = paidSlipRows.reduce((sum, slip) => sum + Number(slip.amount || 0), 0);
+  const memberUserId = (member: Member) => member.user?.id ?? member.userId ?? '';
+  const collectionByUser = new Map<string, number>();
+  const collectionByGroup = new Map<string, number>();
+  paidSlipRows.forEach((slip) => {
+    const amount = Number(slip.amount || 0);
+    if (slip.collectedByUserId) {
+      collectionByUser.set(slip.collectedByUserId, (collectionByUser.get(slip.collectedByUserId) ?? 0) + amount);
+    }
+    if (slip.groupId) {
+      collectionByGroup.set(slip.groupId, (collectionByGroup.get(slip.groupId) ?? 0) + amount);
+    }
+  });
   const memberRows = members.map((member) => {
     const phone = member.phone ?? member.user?.phone ?? '';
     const memberSlips = slipRows.filter((slip) => phone && normalizeIndianPhone(slip.contributorPhone) === normalizeIndianPhone(phone));
     const vargani = memberSlips.filter(isSlipPaid).reduce((sum, slip) => sum + Number(slip.amount || 0), 0);
+    const userId = memberUserId(member);
     return {
+      collected: Number(member.collectionTotal ?? collectionByUser.get(userId) ?? 0),
       contact: phone || '-',
+      groupName: member.group?.name ?? 'No group',
       member,
       name: member.displayName,
+      paidSlipCount: Number(member.paidSlipCount ?? 0),
       paid: vargani > 0,
       role: member.user?.role.replaceAll('_', ' ') ?? 'Member',
       vargani,
+    };
+  });
+  const memberRowsByGroup = new Map<string, typeof memberRows>();
+  memberRows.forEach((row) => {
+    const groupId = row.member.group?.id ?? row.member.groupId;
+    if (!groupId) return;
+    memberRowsByGroup.set(groupId, [...(memberRowsByGroup.get(groupId) ?? []), row]);
+  });
+  const groupsWithStats = groups.map((group) => {
+    const rows = memberRowsByGroup.get(group.id) ?? [];
+    return {
+      ...group,
+      collected: Number(group.collectionTotal ?? collectionByGroup.get(group.id) ?? 0),
+      memberRows: rows,
+      memberCount: rows.length || group._count?.members || group.members?.length || 0,
+      slipCount: Number(group.paidSlipCount ?? group._count?.slips ?? 0),
     };
   });
   const memberVargani = memberRows.filter((member) => member.paid).reduce((sum, member) => sum + member.vargani, 0);
@@ -2011,23 +2076,56 @@ function AdhyakshApp({
               <button className="blue-action" onClick={() => setGroupOpen(true)} type="button"><Plus size={18} />Add Group</button>
               <div className="group-list">
                 {groups.length === 0 && <span className="soft-empty">No groups created yet. Add groups like Main Road, Bazaar Lane, or Sponsor Team.</span>}
-                {groups.map((group) => (
+                {groupsWithStats.map((group) => (
                   <article className="group-chip-card" key={group.id}>
-                    <strong>{group.name}</strong>
-                    <span>{group.areaName || 'Area not set'}</span>
-                    <small>{group.leader?.name ? `Leader: ${group.leader.name}` : 'Leader not assigned'} · {group._count?.members ?? 0} members</small>
+                    <div className="group-chip-top">
+                      <div>
+                        <strong>{group.name}</strong>
+                        <span>{group.areaName || 'Area not set'}</span>
+                      </div>
+                      <b>{money(group.collected)}</b>
+                    </div>
+                    <div className="group-chip-metrics">
+                      <span>{group.memberCount} members</span>
+                      <span>{group.slipCount} paid slips</span>
+                    </div>
+                    <label className="group-leader-picker">
+                      <span>Leader</span>
+                      <select
+                        value={group.leader?.id ?? ''}
+                        onChange={(event) => void onUpdateGroup(group.id, { leaderUserId: event.target.value || null })}
+                      >
+                        <option value="">Assign leader</option>
+                        {members.map((member) => {
+                          const userId = memberUserId(member);
+                          return userId ? <option key={member.id} value={userId}>{member.displayName}</option> : null;
+                        })}
+                      </select>
+                    </label>
+                    <div className="group-member-preview">
+                      {group.memberRows.length === 0 && <small>No members linked yet.</small>}
+                      {group.memberRows.slice(0, 5).map((row) => (
+                        <small key={row.member.id}>
+                          <span>{row.name}</span>
+                          <b>{money(row.collected)}</b>
+                        </small>
+                      ))}
+                      {group.memberRows.length > 5 && <small>+{group.memberRows.length - 5} more members</small>}
+                    </div>
                   </article>
                 ))}
               </div>
             </div>
             <div className="ops-table members-table">
-              <div className="ops-head"><span>Name & Role</span><span>Contact</span><span>Vargani (2026)</span><span>Actions</span></div>
+              <div className="ops-head members-head"><span>Name & Role</span><span>Group</span><span>Contact</span><span>Collected</span><span>Vargani (2026)</span><span>Actions</span></div>
               {isInitialSync && <EmptyTableState message="Loading live member data..." />}
               {workspaceLoaded && memberRows.length === 0 && <EmptyTableState message="No members added yet." />}
               {memberRows.map((member) => (
-                <div className="ops-row" key={member.name}>
+                <div className="ops-row member-row" key={member.member.id}>
                   <strong>{member.name}<small>{member.role}</small></strong>
+                  <span className={member.groupName === 'No group' ? 'muted-cell' : ''}>{member.groupName}</span>
                   <span>{member.contact}</span>
+                  <span><b>{money(member.collected)}</b><small>{member.paidSlipCount} slips</small></span>
                   <span><b>{money(member.vargani)}</b><i className={member.paid ? 'pill paid' : 'pill pending'}>{member.paid ? 'Paid' : 'Pending'}</i></span>
                   <span className="row-actions">
                     <button onClick={() => void onEditMember(member.member)} type="button"><Edit3 size={16} /></button>
@@ -2238,6 +2336,15 @@ function AdhyakshApp({
             <label>Shop Name<input name="shopName" placeholder="Enter shop / business name" /></label>
             <label>Amount<input name="amount" inputMode="numeric" required placeholder="1500" /></label>
             <label>Location<input name="areaName" required placeholder="Main Road, Pune" /></label>
+            <label>
+              Collection Group
+              <select name="groupId" defaultValue="">
+                <option value="">No group</option>
+                {groups.map((group) => (
+                  <option key={group.id} value={group.id}>{group.name}{group.areaName ? ` - ${group.areaName}` : ''}</option>
+                ))}
+              </select>
+            </label>
             <label>Address<textarea name="contributorAddress" placeholder="Full address optional" /></label>
             <label>WhatsApp Number<input name="contributorPhone" placeholder="10 digit WhatsApp number" /></label>
             <PaymentStatusSelector value={entryStatus} onChange={setEntryStatus} />
@@ -2262,9 +2369,10 @@ function AdhyakshApp({
               Group Leader
               <select name="leaderUserId" defaultValue="">
                 <option value="">Assign later</option>
-                {members.map((member) => (
-                  <option key={member.id} value={member.user?.id ?? ''}>{member.displayName}</option>
-                ))}
+                {members.map((member) => {
+                  const userId = memberUserId(member);
+                  return userId ? <option key={member.id} value={userId}>{member.displayName}</option> : null;
+                })}
               </select>
             </label>
             <div className="modal-actions">
