@@ -2654,6 +2654,21 @@ button.pending-action {
   font-weight: 950;
 }
 
+.group-member-preview .leader-badge {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 999px;
+  color: var(--orange-dark);
+  display: inline-flex;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 950;
+  margin-left: 8px;
+  padding: 2px 7px;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
 .members-table .ops-head,
 .members-table .ops-row {
   grid-template-columns: 1.25fr 0.95fr 0.85fr 0.8fr 0.95fr auto;
@@ -2671,6 +2686,45 @@ button.pending-action {
 .muted-cell {
   color: #98a1b0;
   font-weight: 800;
+}
+
+.member-group-control {
+  display: grid;
+  gap: 6px;
+}
+
+.member-group-control select {
+  background: #fff;
+  border: 1px solid #ead7c2;
+  border-radius: 10px;
+  color: var(--ink);
+  font-weight: 850;
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.member-group-control.no-group select {
+  color: #98a1b0;
+}
+
+.member-group-control.needs-group select {
+  border-color: #fb923c;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
+}
+
+.member-group-control small {
+  color: var(--orange-dark);
+  font-size: 11px;
+  font-weight: 900;
+  margin: 0;
+}
+
+.modal-help {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 750;
+  line-height: 1.4;
+  margin: -4px 0 8px;
 }
 
 .adhyaksh-modal {
@@ -5215,7 +5269,7 @@ nav button.active svg,
   }
 
   .members-table .ops-row > :nth-child(4)::before {
-    content: "Collected";
+    content: "Collected by user";
   }
 
   .members-table .ops-row > :nth-child(5)::before {
