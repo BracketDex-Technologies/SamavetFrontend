@@ -839,7 +839,7 @@ export default function App() {
     const generatedPassword = generateTemporaryPassword();
     const mandalName = String(form.get('name') || '').trim();
     const contactPhone = normalizeOptionalIndianPhone(String(form.get('contactPhone') || ''));
-    const logoDataUrl = logo instanceof File && logo.size > 0 ? await fileToDataUrl(logo) : '';
+    let logoDataUrl = '';
     const newMandal: DemoMandal = {
       additionalMembers: String(form.get('additionalMembers') || '').trim(),
       address: String(form.get('address') || '').trim(),
@@ -850,7 +850,7 @@ export default function App() {
       contactEmail: String(form.get('contactEmail') || '').trim(),
       contactPhone,
       khajindarName: String(form.get('khajindarName') || '').trim(),
-      logoUrl: logoDataUrl,
+      logoUrl: '',
       locality: String(form.get('locality') || '').trim(),
       memberCount: String(form.get('memberCount') || '').trim(),
       name: mandalName,
@@ -870,6 +870,10 @@ export default function App() {
       startBusy('Creating mandal...');
       setNotice('Creating mandal...');
       try {
+        if (logo instanceof File && logo.size > 0) {
+          logoDataUrl = await imageFileToCompressedDataUrl(logo);
+        }
+
         const created = await apiRequest<{ mandal: DemoMandal }>(
           '/mandals',
           {
@@ -5075,6 +5079,37 @@ function fileToDataUrl(file: File) {
     reader.onerror = () => reject(new Error('Could not read selected file.'));
     reader.onload = () => resolve(String(reader.result || ''));
     reader.readAsDataURL(file);
+  });
+}
+
+async function imageFileToCompressedDataUrl(file: File) {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('Please upload an image file for mandal logo.');
+  }
+
+  const originalDataUrl = await fileToDataUrl(file);
+  const image = await loadImageElement(originalDataUrl);
+  const maxSide = 640;
+  const scale = Math.min(1, maxSide / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
+  const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
+  const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  if (!ctx) return originalDataUrl;
+  ctx.drawImage(image, 0, 0, width, height);
+
+  return canvas.toDataURL('image/jpeg', 0.82);
+}
+
+function loadImageElement(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Could not process mandal logo. Try a smaller JPG or PNG image.'));
+    image.src = src;
   });
 }
 
