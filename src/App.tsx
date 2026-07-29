@@ -1036,6 +1036,33 @@ export default function App() {
     return { ok: false };
   }
 
+  async function archiveMandal(mandal: DemoMandal) {
+    if (!session || session.user.role !== 'SUPER_ADMIN' || !mandal.id) return false;
+
+    const confirmed = await askConfirm({
+      confirmLabel: 'Delete Mandal',
+      danger: true,
+      message: `${mandal.name} and its users, members, groups, slips, expenses, tasks, templates, and logins will be permanently deleted from the database.`,
+      title: 'Permanently delete mandal?',
+    });
+    if (!confirmed) return false;
+
+    startBusy('Deleting mandal...');
+    try {
+      await apiRequest(`/mandals/${mandal.id}`, { method: 'DELETE' }, session);
+      setDemoMandals((current) => current.filter((item) => item.id !== mandal.id));
+      setNotice(`${mandal.name} permanently deleted.`);
+      await queryClient.invalidateQueries({ queryKey: workspaceQueryKey(session) });
+      void syncWorkspaceQuietly(session);
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not delete mandal.');
+      return false;
+    } finally {
+      stopBusy();
+    }
+  }
+
   async function generateSlip(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!session) return false;
@@ -1586,9 +1613,10 @@ export default function App() {
   async function archiveMember(member: Member) {
     if (!session || !mandalId || !festivalId) return;
     const confirmed = await askConfirm({
+      confirmLabel: 'Delete Member',
       danger: true,
-      message: `${member.displayName} will be removed from the active member list.`,
-      title: 'Archive member?',
+      message: `${member.displayName}, their login, assigned tasks, and slips collected by this login will be permanently deleted from the database.`,
+      title: 'Permanently delete member?',
     });
     if (!confirmed) return;
     try {
@@ -1610,10 +1638,10 @@ export default function App() {
             : group._count,
         };
       }));
-      setNotice('Member archived.');
+      setNotice('Member permanently deleted.');
       void syncWorkspaceQuietly(session);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not archive member.');
+      setNotice(error instanceof Error ? error.message : 'Could not delete member.');
     }
   }
 
@@ -1758,6 +1786,7 @@ export default function App() {
         language={language}
         notice={notice}
         onCreateMandal={createMandal}
+        onArchiveMandal={archiveMandal}
         onLanguageChange={setLanguage}
         onLogout={logout}
         onPrompt={askPrompt}
@@ -2956,6 +2985,7 @@ function SuperAdminApp({
   demoMandals,
   language,
   notice,
+  onArchiveMandal,
   onCreateMandal,
   onLanguageChange,
   onLogout,
@@ -2970,6 +3000,7 @@ function SuperAdminApp({
   demoMandals: DemoMandal[];
   language: Language;
   notice: string;
+  onArchiveMandal: (mandal: DemoMandal) => Promise<boolean>;
   onCreateMandal: (event: FormEvent<HTMLFormElement>) => Promise<{ id?: string; ok: boolean }>;
   onLanguageChange: (language: Language) => void;
   onLogout: () => void;
@@ -3006,15 +3037,16 @@ function SuperAdminApp({
   const selectedTemplatePreview = resolveTemplateAssetUrl(
     (selectedKey && ownerTemplateDrafts[selectedKey]) || selectedTemplateVersion?.backgroundFileUrl || TEMPLATE_IMAGE,
   );
-  const adminUser = selectedMandal?.users?.find((user) => user.role === 'MANDAL_ADMIN');
+  const activeUsers = selectedMandal?.users?.filter((user) => user.status === 'ACTIVE') ?? [];
+  const adminUser = activeUsers.find((user) => user.role === 'MANDAL_ADMIN');
   const persistedLogins =
-    selectedMandal?.users
-      ?.filter((user) => user.role !== 'MANDAL_ADMIN')
+    activeUsers
+      .filter((user) => user.role !== 'MANDAL_ADMIN')
       .map((user) => ({
         password: 'Stored securely in backend',
         role: user.role.replaceAll('_', ' '),
         username: user.email || user.phone || user.name,
-      })) ?? [];
+      }));
   const ownerLoginRows = [
     {
       password: selectedMandal?.adminPassword || 'Stored securely in backend',
@@ -3104,6 +3136,19 @@ function SuperAdminApp({
     setDetailTab('overview');
     setAddMandalOpen(false);
     writeRoute(routeForOwner('mandals', mandal?.id, 'overview'));
+    setSidebarOpen(false);
+  }
+
+  async function deleteMandal(index: number) {
+    const mandal = mandals[index];
+    if (!mandal) return;
+    const deleted = await onArchiveMandal(mandal);
+    if (!deleted) return;
+    setManagedIndex(null);
+    setSelectedIndex(0);
+    setOwnerScreen('mandals');
+    setAddMandalOpen(false);
+    writeRoute(routeForOwner('mandals'));
     setSidebarOpen(false);
   }
 
@@ -3266,7 +3311,7 @@ function SuperAdminApp({
               </div>
               <span>{filteredMandals.length} of {mandals.length} mandals</span>
             </section>
-            <MandalCardGrid items={filteredMandals} onManage={openMandal} />
+            <MandalCardGrid items={filteredMandals} onDelete={deleteMandal} onManage={openMandal} />
           </>
         )}
 
@@ -3322,7 +3367,7 @@ function SuperAdminApp({
               </div>
               <span>{filteredMandals.length} of {mandals.length} mandals</span>
             </section>
-            <MandalCardGrid items={filteredMandals} onManage={openMandal} />
+            <MandalCardGrid items={filteredMandals} onDelete={deleteMandal} onManage={openMandal} />
           </>
         )}
 
@@ -3422,9 +3467,11 @@ function SuperAdminApp({
 
 function MandalCardGrid({
   items,
+  onDelete,
   onManage,
 }: {
   items: Array<{ index: number; mandal: DemoMandal }>;
+  onDelete: (index: number) => void | Promise<void>;
   onManage: (index: number) => void;
 }) {
   return (
@@ -3444,7 +3491,12 @@ function MandalCardGrid({
             <span>{mandal.contactPhone || 'Phone pending'}</span>
             <em>Template Ready</em>
           </div>
-          <button onClick={() => onManage(index)} type="button">Manage</button>
+          <div className="mandal-card-actions">
+            <button onClick={() => onManage(index)} type="button">Manage</button>
+            <button className="danger" onClick={() => void onDelete(index)} type="button">
+              <Trash2 size={16} />Delete
+            </button>
+          </div>
         </article>
       ))}
       {!items.length && (
@@ -5579,7 +5631,7 @@ function mapBackendMandal(
     name: mandal.name,
     slug: mandal.slug,
     status: mandal.status,
-    users: mandal.users ?? [],
+    users: (mandal.users ?? []).filter((user) => user.status === 'ACTIVE'),
   };
 }
 
