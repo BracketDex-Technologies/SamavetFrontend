@@ -203,6 +203,15 @@ interface Slip {
   shopName?: string | null;
   slipNumber: string;
   status?: string;
+  whatsapp?: WhatsAppSendResult | null;
+}
+
+interface WhatsAppSendResult {
+  ok: boolean;
+  provider?: 'AUTHKEY';
+  reason?: string;
+  receiptUrl?: string;
+  status: 'failed' | 'sent' | 'skipped';
 }
 
 interface Template {
@@ -774,22 +783,14 @@ export default function App() {
   }
 
   function prepareWhatsAppWindow(paymentStatus: 'ACTIVE' | 'PENDING') {
-    if (paymentStatus === 'PENDING') {
-      whatsappWindowRef.current?.close();
-      whatsappWindowRef.current = null;
-      return;
-    }
-
-    whatsappWindowRef.current = window.open('about:blank', '_blank');
-    if (whatsappWindowRef.current) {
-      whatsappWindowRef.current.document.write('<!doctype html><title>Preparing WhatsApp</title><p style="font-family:system-ui;padding:24px">Preparing WhatsApp receipt...</p>');
-      whatsappWindowRef.current.document.close();
-    }
+    void paymentStatus;
+    whatsappWindowRef.current?.close();
+    whatsappWindowRef.current = null;
   }
 
   async function createReceiptShare(slip: Slip, phone?: string | null) {
     if (!session || !isSlipPaid(slip)) return null;
-    return apiRequest<{ auditEventId: string; expiresAt: string; ok: boolean; receiptUrl: string; sharedAt: string }>(
+    return apiRequest<{ auditEventId: string; expiresAt: string; ok: boolean; receiptUrl: string; sharedAt: string; whatsapp?: WhatsAppSendResult }>(
       `/vargani/slips/${slip.id}/share`,
       {
         body: JSON.stringify({
@@ -1070,9 +1071,7 @@ export default function App() {
     const form = new FormData(formElement);
     const paymentStatus = String(form.get('paymentStatus') || 'ACTIVE') === 'PENDING' ? 'PENDING' : 'ACTIVE';
     const contributorPhone = String(form.get('contributorPhone') || '');
-    if (paymentStatus === 'ACTIVE' && !whatsappWindowRef.current) {
-      prepareWhatsAppWindow('ACTIVE');
-    }
+    prepareWhatsAppWindow(paymentStatus);
     const customData: Record<string, unknown> = Object.fromEntries(
       (activeForm?.customFields ?? []).map((field) => [
         field.key,
@@ -1085,8 +1084,6 @@ export default function App() {
     if (tentativePaymentDate) {
       customData.tentativePaymentDate = tentativePaymentDate;
     }
-    const whatsappWindow = paymentStatus === 'ACTIVE' ? whatsappWindowRef.current : null;
-    whatsappWindowRef.current = null;
     try {
       const slip = await apiRequest<Slip>(
         '/vargani/slips',
@@ -1113,24 +1110,12 @@ export default function App() {
       formElement.reset();
       void syncWorkspaceQuietly(session);
       if (paymentStatus === 'PENDING') {
-        whatsappWindow?.close();
         setNotice(`Pending vargani entry ${slip.slipNumber} saved.`);
       } else {
-        setNotice(`Slip ${slip.slipNumber} generated. Preparing WhatsApp share...`);
-        void (async () => {
-          try {
-            const share = await createReceiptShare(slip, contributorPhone);
-            await shareReceiptToWhatsApp(slip, contributorPhone, whatsappWindow, share?.receiptUrl);
-            setNotice(`Slip ${slip.slipNumber} generated. WhatsApp opened and receipt message copied.`);
-          } catch (error) {
-            whatsappWindow?.close();
-            setNotice(error instanceof Error ? error.message : 'Slip saved, but WhatsApp share could not be opened.');
-          }
-        })();
+        setNotice(whatsappStatusMessage(slip, slip.whatsapp, 'generated'));
       }
       return true;
     } catch (error) {
-      whatsappWindow?.close();
       setNotice(error instanceof Error ? error.message : 'Could not generate slip.');
       return false;
     }
@@ -1307,12 +1292,10 @@ export default function App() {
       setNotice('Receipt can be shared only after payment is received.');
       return;
     }
-    startBusy('Opening WhatsApp receipt...');
+    startBusy('Sending WhatsApp receipt...');
     try {
-      const whatsappWindow = window.open('about:blank', '_blank');
       const share = await createReceiptShare(slip, slip.contributorPhone);
-      await shareReceiptToWhatsApp(slip, slip.contributorPhone, whatsappWindow, share?.receiptUrl);
-      setNotice(`Slip ${slip.slipNumber} WhatsApp message copied and opened.`);
+      setNotice(whatsappStatusMessage(slip, share?.whatsapp, 'shared'));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not share receipt.');
     } finally {
@@ -5537,59 +5520,13 @@ function isSlipPaid(slip: Slip) {
   return (slip.status ?? 'ACTIVE').toUpperCase() !== 'PENDING';
 }
 
-function buildWhatsAppReceiptMessage(slip: Slip, receiptUrl = 'Digital receipt link is being generated.') {
-  const shopLine = slip.shopName ? `दुकान / संस्था: ${slip.shopName}\n` : '';
-  const areaLine = slip.areaName ? `परिसर: ${slip.areaName}\n` : '';
-
-  return `॥ श्री गणेशाय नमः ॥ 🙏🐘
-
-आदरणीय भक्तगण,
-
-पुणे गणपती उत्सव परिवाराच्या वतीने आपल्या अमूल्य देणगीबद्दल मनःपूर्वक आभार! 🌺
-
-आपण दिलेल्या देणगीची डिजिटल पावती या संदेशासोबत जोडलेली आहे. कृपया ती आपल्या नोंदीसाठी जतन करून ठेवा.
-
-पावती क्रमांक: ${slip.slipNumber}
-नाव: ${slip.contributorName}
-${shopLine}${areaLine}रक्कम: ${money(Number(slip.amount))}
-डिजिटल पावती: ${receiptUrl}
-
-आपल्या सहकार्यामुळे श्रींचा उत्सव अधिक भक्तिमय, भव्य आणि यशस्वी होण्यासाठी मोलाची मदत होत आहे.
-
-श्री गणराय आपल्या जीवनात सुख, समृद्धी, उत्तम आरोग्य आणि सर्व मनोकामना पूर्ण करो, हीच श्रीचरणी प्रार्थना. 🌸
-
-📄 टीप: ही System Generated Digital Receipt असून यासाठी स्वतंत्र स्वाक्षरीची आवश्यकता नाही.
-
-आपल्या प्रेम, विश्वास आणि सहकार्याबद्दल पुन्हा एकदा मनःपूर्वक धन्यवाद! 🙏
-
-॥ गणपती बाप्पा मोरया ॥
-मंगलमूर्ती मोरया! ❤️🌺
-
-– पुणे गणपती उत्सव`;
-}
-async function copyShareMessage(slip: Slip, receiptUrl?: string) {
-  const text = buildWhatsAppReceiptMessage(slip, receiptUrl);
-  await navigator.clipboard?.writeText(text).catch(() => undefined);
-  return text;
-}
-
-async function shareReceiptToWhatsApp(slip: Slip, phone?: string | null, targetWindow?: Window | null, receiptUrl?: string) {
-  const text = await copyShareMessage(slip, receiptUrl);
-  openWhatsAppForSlip(slip, phone, text, targetWindow);
-}
-
-function openWhatsAppForSlip(slip: Slip, phone?: string | null, preparedText?: string, targetWindow?: Window | null) {
-  const text = preparedText ?? buildWhatsAppReceiptMessage(slip);
-  const digits = normalizeIndianPhone(phone);
-  const url = digits
-    ? `https://wa.me/${digits}?text=${encodeURIComponent(text)}`
-    : `https://wa.me/?text=${encodeURIComponent(text)}`;
-  if (targetWindow) {
-    targetWindow.location.href = url;
-    targetWindow.focus();
-    return;
-  }
-  window.open(url, '_blank', 'noopener,noreferrer');
+function whatsappStatusMessage(slip: Slip, result: WhatsAppSendResult | null | undefined, action: 'generated' | 'shared') {
+  const base = `Slip ${slip.slipNumber} ${action}.`;
+  if (!result) return `${base} WhatsApp status is pending.`;
+  if (result.status === 'sent') return `${base} WhatsApp receipt sent to ${slip.contributorPhone || 'donor number'}.`;
+  if (result.status === 'skipped') return `${base} WhatsApp sending is not enabled yet.`;
+  if (result.reason === 'missing_whatsapp_number') return `${base} Add a valid WhatsApp number and use Share again.`;
+  return `${base} WhatsApp could not be sent. Try Share again.`;
 }
 
 function normalizeIndianPhone(phone?: string | null) {
