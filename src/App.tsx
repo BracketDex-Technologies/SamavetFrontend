@@ -200,6 +200,7 @@ interface Slip {
   customData?: Record<string, string>;
   groupId?: string | null;
   paymentMode: PaymentMode;
+  receiptImageUrl?: string | null;
   shopName?: string | null;
   slipNumber: string;
   status?: string;
@@ -803,6 +804,27 @@ export default function App() {
     );
   }
 
+  async function uploadRenderedSlipImage(slip: Slip) {
+    if (!session) throw new Error('Login again to upload receipt image.');
+    const blob = await renderSlipJpegBlob(slip);
+    const dataUrl = await blobToDataUrl(blob);
+    const upload = await apiRequest<{ ok: boolean; receiptImageUrl: string; storage: string }>(
+      `/vargani/slips/${slip.id}/receipt-image`,
+      {
+        body: JSON.stringify({ dataUrl }),
+        method: 'POST',
+      },
+      session,
+    );
+    setSlips((current) =>
+      current.map((item) => (item.id === slip.id ? { ...item, receiptImageUrl: upload.receiptImageUrl } : item)),
+    );
+    setSelectedSlip((current) =>
+      current?.id === slip.id ? { ...current, receiptImageUrl: upload.receiptImageUrl } : current,
+    );
+    return upload;
+  }
+
   async function restoreSession(storedSession: AuthSession) {
     try {
       const profile = await apiRequest<{ user: AuthSession['user'] }>('/auth/me', {}, storedSession);
@@ -1112,7 +1134,17 @@ export default function App() {
       if (paymentStatus === 'PENDING') {
         setNotice(`Pending vargani entry ${slip.slipNumber} saved.`);
       } else {
-        setNotice(whatsappStatusMessage(slip, slip.whatsapp, 'generated'));
+        try {
+          await uploadRenderedSlipImage(slip);
+          const share = await createReceiptShare(slip, contributorPhone);
+          setNotice(whatsappStatusMessage(slip, share?.whatsapp, 'generated'));
+        } catch (shareError) {
+          setNotice(
+            `Slip ${slip.slipNumber} generated, but WhatsApp could not be sent: ${
+              shareError instanceof Error ? shareError.message : 'receipt image upload failed'
+            }`,
+          );
+        }
       }
       return true;
     } catch (error) {
@@ -1121,9 +1153,7 @@ export default function App() {
     }
   }
 
-  async function downloadSlipAsJpeg(slip: Slip) {
-    startBusy('Preparing slip image...');
-    try {
+  async function renderSlipJpegBlob(slip: Slip) {
       let placements: Record<string, TemplatePlacement> =
         normalizeTemplatePlacements(latestTemplateVersion?.renderConfig?.fields);
       let bgUrl = resolveTemplateAssetUrl(latestTemplateVersion?.backgroundFileUrl || templatePreview || TEMPLATE_IMAGE);
@@ -1264,23 +1294,31 @@ export default function App() {
         ctx.restore();
       });
 
-      canvas.toBlob((blob) => {
-        if (!blob) {
-          setNotice('Could not generate JPEG slip image.');
-          stopBusy();
-          return;
-        }
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `Slip_${slip.slipNumber || slip.id}.jpg`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-        setNotice(`Slip ${slip.slipNumber} downloaded as JPEG image.`);
-        stopBusy();
-      }, 'image/jpeg', 0.95);
+      return await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            reject(new Error('Could not generate JPEG slip image.'));
+            return;
+          }
+          resolve(blob);
+        }, 'image/jpeg', 0.95);
+      });
+  }
+
+  async function downloadSlipAsJpeg(slip: Slip) {
+    startBusy('Preparing slip image...');
+    try {
+      const blob = await renderSlipJpegBlob(slip);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Slip_${slip.slipNumber || slip.id}.jpg`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setNotice(`Slip ${slip.slipNumber} downloaded as JPEG image.`);
+      stopBusy();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not download slip image');
       stopBusy();
@@ -1294,6 +1332,7 @@ export default function App() {
     }
     startBusy('Sending WhatsApp receipt...');
     try {
+      await uploadRenderedSlipImage(slip);
       const share = await createReceiptShare(slip, slip.contributorPhone);
       setNotice(whatsappStatusMessage(slip, share?.whatsapp, 'shared'));
     } catch (error) {
@@ -5621,6 +5660,15 @@ function fileToDataUrl(file: File) {
     reader.onerror = () => reject(new Error('Could not read selected file.'));
     reader.onload = () => resolve(String(reader.result || ''));
     reader.readAsDataURL(file);
+  });
+}
+
+function blobToDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read generated receipt image.'));
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.readAsDataURL(blob);
   });
 }
 
