@@ -288,6 +288,7 @@ interface DemoMandal {
   locality: string;
   memberCount?: string;
   name: string;
+  nameMr?: string | null;
   id?: string;
   slug?: string;
   status?: string;
@@ -998,6 +999,7 @@ export default function App() {
       locality: String(form.get('locality') || '').trim(),
       memberCount: String(form.get('memberCount') || '').trim(),
       name: mandalName,
+      nameMr: String(form.get('nameMr') || '').trim(),
     };
 
     if (!newMandal.name) {
@@ -1036,6 +1038,7 @@ export default function App() {
               logoDataUrl: logoDataUrl || undefined,
               locality: newMandal.locality || undefined,
               name: newMandal.name,
+              nameMr: newMandal.nameMr || undefined,
               plan: 'starter',
               state: 'Maharashtra',
             }),
@@ -3400,6 +3403,7 @@ function SuperAdminApp({
                   <button className="ghost-button" onClick={() => { setAddMandalOpen(false); writeRoute(routeForOwner('mandals')); }} type="button">Close</button>
                 </div>
                 <label className="full">Mandal Name *<input name="name" required placeholder="Ganesh Mitra Mandal" /></label>
+                <label className="full">Mandal Name in Marathi<input name="nameMr" placeholder="बाजीराव रोड नतुबग मंडळ ट्रस्ट" /></label>
                 <label>{t(language, 'Address')}<input name="address" placeholder="Full mandal address" /></label>
                 <label>Locality<input name="locality" placeholder="Main Road, Pune" /></label>
                 <label>City<input name="city" defaultValue="Pune" /></label>
@@ -5880,6 +5884,7 @@ function mapBackendMandal(
     locality: mandal.locality ?? '',
     memberCount: String(mandal._count?.members ?? mandal.memberCount ?? 0),
     name: mandal.name,
+    nameMr: mandal.nameMr ?? null,
     slug: mandal.slug,
     status: mandal.status,
     users: (mandal.users ?? []).filter((user) => user.status === 'ACTIVE'),
