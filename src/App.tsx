@@ -1102,6 +1102,10 @@ export default function App() {
           : String(form.get(`custom_${field.key}`) || ''),
       ]),
     );
+    const contributorNameMr = String(form.get('contributorNameMr') || '').trim();
+    if (contributorNameMr) {
+      customData.contributorNameMr = contributorNameMr;
+    }
     const tentativePaymentDate = String(form.get('tentativePaymentDate') || '');
     if (tentativePaymentDate) {
       customData.tentativePaymentDate = tentativePaymentDate;
@@ -1204,7 +1208,7 @@ export default function App() {
         amountWordsMarathi: amountToMarathiWords(rawAmount),
         building_name: slip.customData?.building_name || sampleFieldValue('building_name', 'Building / Lane'),
         contributorAddress: slip.contributorAddress || sampleFieldValue('contributorAddress', 'Address'),
-        contributorName: slip.contributorName || sampleFieldValue('contributorName', 'Name'),
+        contributorName: String(slip.customData?.contributorNameMr || '').trim() || slip.contributorName || sampleFieldValue('contributorName', 'Name'),
         contributorPhone: slip.contributorPhone || sampleFieldValue('contributorPhone', 'Mobile No.'),
         createdAt: formattedDate,
         paymentMode: slip.paymentMode || 'CASH',
@@ -1225,7 +1229,7 @@ export default function App() {
           text = lastPart.length > 3 ? lastPart.slice(-3) : lastPart;
         }
 
-        const renderText = transformTemplateText(text, p);
+        const renderText = transformTemplateText(receiptRenderText(baseKey, text, rawAmount), p);
         ctx.save();
         ctx.globalAlpha = p.opacity ?? 1;
         const fontStyle = p.fontStyle === 'italic' ? 'italic ' : '';
@@ -2620,7 +2624,7 @@ function AdhyakshApp({
           }}>
             <button className="modal-close" disabled={modalSubmitting === 'entry'} onClick={() => setEntryOpen(false)} type="button"><X size={20} /></button>
             <h2>New Vargani Entry</h2>
-            <label>Name<input name="contributorName" required placeholder="Enter full name" /></label>
+            <ContributorNameFields />
             <label>Shop Name<input name="shopName" placeholder="Enter shop / business name" /></label>
             <label>Amount<input name="amount" inputMode="numeric" required placeholder="1500" /></label>
             <label>Location<input name="areaName" required placeholder="Main Road, Pune" /></label>
@@ -2816,6 +2820,33 @@ function EmptyTableState({ message }: { message: string }) {
       <ReceiptText size={28} />
       <strong>{message}</strong>
     </div>
+  );
+}
+
+function ContributorNameFields() {
+  const [name, setName] = useState('');
+  const [marathiName, setMarathiName] = useState('');
+  const [manualMarathi, setManualMarathi] = useState(false);
+
+  const autoMarathiName = useMemo(() => transliterateReceiptTextToMarathi(name).trim(), [name]);
+
+  function updateName(nextName: string) {
+    setName(nextName);
+    if (!manualMarathi) {
+      setMarathiName(transliterateReceiptTextToMarathi(nextName).trim());
+    }
+  }
+
+  function updateMarathiName(nextName: string) {
+    setMarathiName(nextName);
+    setManualMarathi(Boolean(nextName.trim()) && nextName.trim() !== autoMarathiName);
+  }
+
+  return (
+    <>
+      <label>Name *<input name="contributorName" onChange={(event) => updateName(event.currentTarget.value)} required placeholder="Enter full name" value={name} /></label>
+      <label>Name on Marathi Slip<input name="contributorNameMr" onChange={(event) => updateMarathiName(event.currentTarget.value)} placeholder="Auto Marathi name" value={marathiName} /></label>
+    </>
   );
 }
 
@@ -3889,7 +3920,7 @@ function MemberCollectorApp({
                 <span>Fill contribution details and generate slip.</span>
               </div>
             </div>
-            <label>Name *<input name="contributorName" required placeholder="Enter full name" /></label>
+            <ContributorNameFields />
             <label>Shop Name<input name="shopName" placeholder="Enter shop / business name" /></label>
             <label>Amount (Rs.) *<input inputMode="numeric" name="amount" required placeholder="e.g. 1500" /></label>
             <label>Location *<input name="areaName" required placeholder="e.g. Main Road, Pune" /></label>
@@ -4137,6 +4168,250 @@ function applyAutoMarathiTranslation(text: string, placement?: Partial<TemplateP
     translated = translated.replace(new RegExp(eng, 'gi'), mr);
   });
   return toMarathiDigits(translated);
+}
+
+const RECEIPT_MARATHI_TEXT_FIELDS = new Set([
+  'areaName',
+  'building_name',
+  'collectorName',
+  'contributorAddress',
+  'contributorName',
+  'donorType',
+  'paymentMode',
+  'receipt_note',
+  'shopName',
+]);
+
+const RECEIPT_MARATHI_DIGIT_FIELDS = new Set(['amount', 'createdAt', 'slipNumber']);
+
+const LATIN_TO_MARATHI_WORDS: Record<string, string> = {
+  aditya: 'आदित्य',
+  akash: 'आकाश',
+  amit: 'अमित',
+  aniket: 'अनिकेत',
+  area: 'परिसर',
+  barathe: 'बाराथे',
+  building: 'बिल्डिंग',
+  cash: 'नगद',
+  chaudhari: 'चौधरी',
+  chaudhary: 'चौधरी',
+  chingu: 'चिंगू',
+  choudhari: 'चौधरी',
+  choudhary: 'चौधरी',
+  chowdhari: 'चौधरी',
+  chowdhary: 'चौधरी',
+  collector: 'कलेक्टर',
+  darshan: 'दर्शन',
+  dhiraj: 'धीरज',
+  gade: 'गाडे',
+  gadhave: 'गाढवे',
+  gadekar: 'गाडेकर',
+  gaikwad: 'गायकवाड',
+  ghorpade: 'घोरपडे',
+  ghadekar: 'घाडेकर',
+  gorpade: 'घोरपडे',
+  group: 'गट',
+  hande: 'हांडे',
+  kakde: 'काकडे',
+  lane: 'लेन',
+  mahesh: 'महेश',
+  main: 'मुख्य',
+  mandal: 'मंडळ',
+  mitra: 'मित्र',
+  mogre: 'मोगरे',
+  omkar: 'ओंकार',
+  online: 'ऑनलाइन',
+  pawan: 'पवन',
+  prateek: 'प्रतीक',
+  pratik: 'प्रतीक',
+  pawar: 'पवार',
+  pune: 'पुणे',
+  road: 'रोड',
+  rohan: 'रोहन',
+  sample: 'सॅम्पल',
+  shashikant: 'शशिकांत',
+  shirsat: 'शिरसाट',
+  shop: 'दुकान',
+  siddharth: 'सिद्धार्थ',
+  soshikant: 'सोशिकांत',
+  suraj: 'सुरज',
+  superkar: 'सुपेकर',
+  traders: 'ट्रेडर्स',
+  upi: 'यूपीआय',
+  wanawadigaon: 'वानवडीगाव',
+  wasti: 'वस्ती',
+  yash: 'यश',
+  yogesh: 'योगेश',
+};
+
+const DEVANAGARI_VOWELS: Record<string, string> = {
+  aa: 'आ',
+  ai: 'ऐ',
+  au: 'औ',
+  ee: 'ई',
+  ii: 'ई',
+  oo: 'ऊ',
+  a: 'अ',
+  e: 'ए',
+  i: 'इ',
+  o: 'ओ',
+  u: 'उ',
+};
+
+const DEVANAGARI_MATRAS: Record<string, string> = {
+  aa: 'ा',
+  ai: 'ै',
+  au: 'ौ',
+  ee: 'ी',
+  ii: 'ी',
+  oo: 'ू',
+  a: '',
+  e: 'े',
+  i: 'ि',
+  o: 'ो',
+  u: 'ु',
+};
+
+const DEVANAGARI_CONSONANTS: Record<string, string> = {
+  bh: 'भ',
+  ch: 'च',
+  dh: 'ध',
+  gh: 'घ',
+  jh: 'झ',
+  kh: 'ख',
+  ph: 'फ',
+  sh: 'श',
+  th: 'थ',
+  b: 'ब',
+  c: 'क',
+  d: 'द',
+  f: 'फ',
+  g: 'ग',
+  h: 'ह',
+  j: 'ज',
+  k: 'क',
+  l: 'ल',
+  m: 'म',
+  n: 'न',
+  p: 'प',
+  q: 'क',
+  r: 'र',
+  s: 'स',
+  t: 'त',
+  v: 'व',
+  w: 'व',
+  x: 'क्स',
+  y: 'य',
+  z: 'झ',
+};
+
+const DEVANAGARI_LETTER_NAMES: Record<string, string> = {
+  A: 'ए',
+  B: 'बी',
+  C: 'सी',
+  D: 'डी',
+  E: 'ई',
+  F: 'एफ',
+  G: 'जी',
+  H: 'एच',
+  I: 'आय',
+  J: 'जे',
+  K: 'के',
+  L: 'एल',
+  M: 'एम',
+  N: 'एन',
+  O: 'ओ',
+  P: 'पी',
+  Q: 'क्यू',
+  R: 'आर',
+  S: 'एस',
+  T: 'टी',
+  U: 'यू',
+  V: 'वी',
+  W: 'डब्ल्यू',
+  X: 'एक्स',
+  Y: 'वाय',
+  Z: 'झेड',
+};
+
+function hasDevanagari(text: string) {
+  return /[\u0900-\u097F]/.test(text);
+}
+
+function readToken(source: string, index: number, map: Record<string, string>) {
+  const keys = Object.keys(map).sort((a, b) => b.length - a.length);
+  return keys.find((key) => source.startsWith(key, index));
+}
+
+function transliterateLatinWordToMarathi(word: string) {
+  if (!word || hasDevanagari(word)) return word;
+  if (/^[A-Z]$/.test(word)) return DEVANAGARI_LETTER_NAMES[word] ?? word;
+  if (/^[A-Z]{2,}$/.test(word)) {
+    return word.split('').map((letter) => DEVANAGARI_LETTER_NAMES[letter] ?? letter).join('');
+  }
+
+  const exact = LATIN_TO_MARATHI_WORDS[word.toLowerCase()];
+  if (exact) return exact;
+
+  const lower = word.toLowerCase();
+  let output = '';
+  let index = 0;
+
+  while (index < lower.length) {
+    const vowel = readToken(lower, index, DEVANAGARI_VOWELS);
+    if (vowel) {
+      output += DEVANAGARI_VOWELS[vowel];
+      index += vowel.length;
+      continue;
+    }
+
+    const consonant = readToken(lower, index, DEVANAGARI_CONSONANTS);
+    if (!consonant) {
+      output += word[index] ?? '';
+      index += 1;
+      continue;
+    }
+
+    const nextIndex = index + consonant.length;
+    const nextVowel = readToken(lower, nextIndex, DEVANAGARI_MATRAS);
+    output += DEVANAGARI_CONSONANTS[consonant];
+
+    if (nextVowel) {
+      output += DEVANAGARI_MATRAS[nextVowel];
+      index = nextIndex + nextVowel.length;
+    } else {
+      const hasMoreLatin = /[a-z]/.test(lower.slice(nextIndex));
+      const nextIsConsonant = Boolean(readToken(lower, nextIndex, DEVANAGARI_CONSONANTS));
+      output += hasMoreLatin && nextIsConsonant ? '्' : '';
+      index = nextIndex;
+    }
+  }
+
+  return output;
+}
+
+function transliterateReceiptTextToMarathi(text: string) {
+  if (!text) return text;
+  const withKnownWords = Object.entries(MARATHI_WORD_MAP).reduce(
+    (current, [eng, mr]) => current.replace(new RegExp(eng, 'gi'), mr),
+    text,
+  );
+  return toMarathiDigits(
+    withKnownWords.replace(/[A-Za-z]+/g, (word) => transliterateLatinWordToMarathi(word)),
+  );
+}
+
+function receiptRenderText(baseKey: string, text: string, amount: number) {
+  if (baseKey === 'amountWords' || baseKey === 'amountWordsMarathi') {
+    return amountToMarathiWords(amount);
+  }
+  if (RECEIPT_MARATHI_DIGIT_FIELDS.has(baseKey)) {
+    return toMarathiDigits(text);
+  }
+  if (RECEIPT_MARATHI_TEXT_FIELDS.has(baseKey)) {
+    return transliterateReceiptTextToMarathi(text);
+  }
+  return text;
 }
 
 const INDIAN_NUMBER_ONES = [
