@@ -1,4 +1,40 @@
-# React + TypeScript + Vite
+# Samavet ePawati frontend
+
+Mobile-first React and Vite frontend for Samavet ePawati.
+
+## Local development
+
+Copy `.env.example` to `.env.local`, then run:
+
+```bash
+npm ci
+npm run dev
+```
+
+## Production verification
+
+```bash
+npm run lint
+npm run build
+npm run preview
+```
+
+Only `VITE_API_BASE_URL` is required. Vite variables are public browser configuration; never store database passwords, JWT secrets, Supabase service-role keys, or WhatsApp keys in them.
+
+For the Vercel Production environment, set `VITE_API_BASE_URL=https://samavetbackend.onrender.com/api/v1` and redeploy after changing it. The custom production domain is `https://epawati.samavet.in`.
+
+The included `vercel.json` configures SPA routing, immutable caching for hashed assets, and browser security headers. The included Docker and Nginx configuration provides an alternative static deployment.
+
+## Performance behavior
+
+- Hashed production assets are cached for one year.
+- HTML is not cached, so releases become visible immediately.
+- The UI uses system fonts and does not block rendering on third-party font downloads.
+- API requests time out with a readable retry message.
+- Session refresh and workspace synchronization are deduplicated.
+- Receipt rendering and WhatsApp finalization run after slip creation is confirmed.
+
+## React + TypeScript + Vite notes
 
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 

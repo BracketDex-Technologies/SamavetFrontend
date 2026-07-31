@@ -7,6 +7,8 @@ export interface ApiAuthSession {
 export const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 const SESSION_KEY = 'digital-vargani-admin-session';
 const SESSION_EXPIRED_EVENT = 'digital-vargani-session-expired';
+const REQUEST_TIMEOUT_MS = 30_000;
+let refreshInFlight: Promise<boolean> | null = null;
 
 export async function apiRequest<T>(
   path: string,
@@ -16,14 +18,16 @@ export async function apiRequest<T>(
   const response = await fetchWithAuth(path, options, session);
 
   if (response.status === 401 && session?.refreshToken && path !== '/auth/refresh') {
-    const refreshed = await refreshSession(session);
+    // A page can issue several API calls at once. If the access token expires,
+    // refresh it once and let every failed request reuse the same result.
+    const refreshed = await refreshSessionOnce(session);
     if (refreshed) {
       const retryResponse = await fetchWithAuth(path, options, session);
       if (!retryResponse.ok) {
         throw new Error(readErrorMessage(await retryResponse.text(), retryResponse.status));
       }
 
-      return retryResponse.json() as Promise<T>;
+      return readResponse<T>(retryResponse);
     }
   }
 
@@ -31,18 +35,50 @@ export async function apiRequest<T>(
     throw new Error(readErrorMessage(await response.text(), response.status));
   }
 
-  return response.json() as Promise<T>;
+  return readResponse<T>(response);
 }
 
 async function fetchWithAuth(path: string, options: RequestInit, session?: ApiAuthSession | null) {
-  return fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(session?.accessToken ? { Authorization: `Bearer ${session.accessToken}` } : {}),
-      ...options.headers,
-    },
-  });
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const abortFromCaller = () => controller.abort();
+  options.signal?.addEventListener('abort', abortFromCaller, { once: true });
+  const headers = new Headers(options.headers);
+  headers.set('Accept', 'application/json');
+  if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  if (session?.accessToken) headers.set('Authorization', `Bearer ${session.accessToken}`);
+
+  try {
+    return await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (controller.signal.aborted && !options.signal?.aborted) {
+      throw new Error('The server took too long to respond. Please try again.');
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', abortFromCaller);
+  }
+}
+
+async function readResponse<T>(response: Response): Promise<T> {
+  if (response.status === 204) return undefined as T;
+  const body = await response.text();
+  if (!body) return undefined as T;
+  return JSON.parse(body) as T;
+}
+
+function refreshSessionOnce(session: ApiAuthSession) {
+  if (!refreshInFlight) {
+    refreshInFlight = refreshSession(session).finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
 }
 
 async function refreshSession(session: ApiAuthSession) {
@@ -57,7 +93,7 @@ async function refreshSession(session: ApiAuthSession) {
       return false;
     }
 
-    const nextSession = await response.json() as ApiAuthSession;
+    const nextSession = await readResponse<ApiAuthSession>(response);
     session.accessToken = nextSession.accessToken;
     session.refreshToken = nextSession.refreshToken;
     session.user = nextSession.user;
