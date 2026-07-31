@@ -12,12 +12,16 @@ import {
   EyeOff,
   FileText,
   History,
+  Grid3X3,
   LayoutDashboard,
+  LockKeyhole,
   LogOut,
+  Magnet,
   Menu,
   MessageSquare,
   Clock,
   Plus,
+  Redo2,
   ReceiptText,
   RefreshCw,
   Search,
@@ -26,11 +30,16 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
+  Ruler,
+  Undo2,
   Upload,
+  Unlock,
   UserCog,
   UsersRound,
   WalletCards,
   X,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -73,6 +82,15 @@ type ThemedDialogRequest =
     };
 type ThemedPromptOptions = Omit<Extract<ThemedDialogRequest, { type: 'prompt' }>, 'resolve' | 'type'>;
 
+function WhatsAppIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg aria-hidden="true" fill="none" height={size} viewBox="0 0 24 24" width={size}>
+      <path d="M20.4 11.8a8.4 8.4 0 0 1-12.5 7.3L3.5 20.5l1.4-4.2A8.4 8.4 0 1 1 20.4 11.8Z" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.9" />
+      <path d="M8.2 7.6c.2-.4.4-.4.7-.4h.4c.2 0 .4.1.5.4l.8 1.8c.1.3.1.5-.1.7l-.6.7c-.2.2-.1.4 0 .6.7 1.2 1.6 2.1 2.8 2.7.3.1.5.1.7-.1l.8-1c.2-.2.4-.3.7-.2l1.9.9c.3.1.4.3.4.5 0 .5-.2 1.4-.7 1.8-.5.5-1.3.8-2.1.8-1 0-2.6-.5-4.4-2.1-2-1.8-3.2-4.1-3.3-5.4 0-.7.2-1.3.5-1.7Z" fill="currentColor" />
+    </svg>
+  );
+}
+
 interface TemplatePlacement {
   autoMarathi?: boolean;
   backgroundColor: string;
@@ -86,6 +104,7 @@ interface TemplatePlacement {
   height: number;
   letterSpacing: number;
   lineHeight: number;
+  locked?: boolean;
   opacity: number;
   padding: number;
   rotate: number;
@@ -124,6 +143,57 @@ interface CustomField {
   required: boolean;
   sortOrder: number;
   type: string;
+}
+
+type EntryFieldKey =
+  | 'contributorName'
+  | 'contributorNameMr'
+  | 'shopName'
+  | 'amount'
+  | 'areaName'
+  | 'groupId'
+  | 'contributorAddress'
+  | 'contributorPhone'
+  | 'paymentStatus'
+  | 'paymentMode'
+  | 'tentativePaymentDate';
+
+interface EntryFieldConfig {
+  key: EntryFieldKey;
+  label: string;
+  required: boolean;
+  locked?: boolean;
+  type: string;
+  visible: boolean;
+}
+
+const DEFAULT_ENTRY_FIELDS: EntryFieldConfig[] = [
+  { key: 'contributorName', label: 'Name', required: true, locked: true, type: 'TEXT', visible: true },
+  { key: 'contributorNameMr', label: 'Name on Marathi Slip', required: false, type: 'TEXT', visible: true },
+  { key: 'shopName', label: 'Shop Name', required: false, type: 'TEXT', visible: true },
+  { key: 'amount', label: 'Amount', required: true, locked: true, type: 'NUMBER', visible: true },
+  { key: 'areaName', label: 'Location / Area', required: false, type: 'TEXT', visible: false },
+  { key: 'groupId', label: 'Collection Group', required: false, type: 'DROPDOWN', visible: true },
+  { key: 'contributorAddress', label: 'Address', required: false, type: 'LONG TEXT', visible: true },
+  { key: 'contributorPhone', label: 'WhatsApp Number', required: false, type: 'PHONE', visible: true },
+  { key: 'paymentStatus', label: 'Payment Status', required: true, locked: true, type: 'CHOICE', visible: true },
+  { key: 'paymentMode', label: 'Payment Mode', required: true, type: 'DROPDOWN', visible: true },
+  { key: 'tentativePaymentDate', label: 'Tentative Payment Date', required: false, type: 'DATE', visible: true },
+];
+
+function normalizeEntryFields(value: unknown): EntryFieldConfig[] {
+  if (!Array.isArray(value)) return DEFAULT_ENTRY_FIELDS;
+  return DEFAULT_ENTRY_FIELDS.map((fallback) => {
+    const saved = value.find((item) => item && typeof item === 'object' && 'key' in item && item.key === fallback.key);
+    if (!saved || typeof saved !== 'object') return fallback;
+    const candidate = saved as Partial<EntryFieldConfig>;
+    return {
+      ...fallback,
+      label: typeof candidate.label === 'string' && candidate.label.trim() ? candidate.label.trim() : fallback.label,
+      required: fallback.locked ? true : Boolean(candidate.required),
+      visible: fallback.locked ? true : candidate.visible !== false,
+    };
+  });
 }
 
 interface Festival {
@@ -281,6 +351,7 @@ interface DemoMandal {
   adminPassword?: string;
   city: string;
   contactEmail?: string;
+  contactName?: string;
   contactPhone: string;
   festivals?: Festival[];
   khajindarName: string;
@@ -288,10 +359,15 @@ interface DemoMandal {
   locality: string;
   memberCount?: string;
   name: string;
+  nameMr?: string;
+  plan?: string;
+  state?: string;
   id?: string;
   slug?: string;
+  slipLimit?: number | null;
   status?: string;
   users?: MandalLoginUser[];
+  whatsappMode?: 'AUTO_API' | 'MANUAL_SHARE';
 }
 
 interface MandalLoginUser {
@@ -348,6 +424,7 @@ type WorkspaceBootstrap = OwnerWorkspaceBootstrap | MandalWorkspaceBootstrap;
 const SESSION_KEY = 'digital-vargani-admin-session';
 const SESSION_EXPIRED_EVENT = 'digital-vargani-session-expired';
 const LANGUAGE_KEY = 'digital-vargani-language';
+const WORKSPACE_CACHE_PREFIX = 'samavet:workspace-cache';
 const DEFAULT_OWNER_IDENTIFIER = 'owner@digitalvargani.local';
 const TEMPLATE_IMAGE = '/templates/default-vargani-receipt.svg';
 
@@ -440,6 +517,29 @@ function t(language: Language, text: string) {
   return cleanTranslations[language][text] ?? translations[language][text] ?? text;
 }
 
+const slipBackgroundCache = new Map<string, Promise<HTMLImageElement>>();
+
+function loadSlipBackground(url: string) {
+  const cached = slipBackgroundCache.get(url);
+  if (cached) return cached;
+  const pending = new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = 'anonymous';
+    image.onload = () => resolve(image);
+    image.onerror = () => {
+      slipBackgroundCache.delete(url);
+      reject(new Error('Could not load slip background image'));
+    };
+    image.src = url;
+  });
+  if (slipBackgroundCache.size >= 6) {
+    const oldest = slipBackgroundCache.keys().next().value;
+    if (oldest) slipBackgroundCache.delete(oldest);
+  }
+  slipBackgroundCache.set(url, pending);
+  return pending;
+}
+
 export default function App() {
   const queryClient = useQueryClient();
   const [session, setSession] = useState<AuthSession | null>(null);
@@ -469,13 +569,62 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [themedDialog, setThemedDialog] = useState<ThemedDialogRequest | null>(null);
   const whatsappWindowRef = useRef<Window | null>(null);
+  const workspaceSyncTimerRef = useRef<number | null>(null);
+  const workspaceSyncInFlightRef = useRef<Promise<void> | null>(null);
   const [language, setLanguage] = useState<Language>(() => {
     const stored = window.localStorage.getItem(LANGUAGE_KEY);
     return stored === 'mr' || stored === 'hi' ? stored : 'en';
   });
+  const [entryFields, setEntryFields] = useState<EntryFieldConfig[]>(DEFAULT_ENTRY_FIELDS);
 
   const mandalId = session?.user.mandalId;
   const festivalId = activeForm?.festival.id;
+  const entryFieldsStorageKey = mandalId && festivalId
+    ? `samavet:vargani-form:${mandalId}:${festivalId}`
+    : '';
+
+  useEffect(() => {
+    if (!entryFieldsStorageKey) {
+      setEntryFields(DEFAULT_ENTRY_FIELDS);
+      return;
+    }
+    try {
+      const stored = window.localStorage.getItem(entryFieldsStorageKey);
+      let fields = stored ? normalizeEntryFields(JSON.parse(stored)) : DEFAULT_ENTRY_FIELDS;
+      const locationRemovalKey = `${entryFieldsStorageKey}:location-removed-v1`;
+      if (!window.localStorage.getItem(locationRemovalKey)) {
+        fields = fields.map((field) => field.key === 'areaName'
+          ? { ...field, required: false, visible: false }
+          : field);
+        window.localStorage.setItem(entryFieldsStorageKey, JSON.stringify(fields));
+        window.localStorage.setItem(locationRemovalKey, '1');
+      }
+      setEntryFields(fields);
+    } catch {
+      setEntryFields(DEFAULT_ENTRY_FIELDS);
+    }
+  }, [entryFieldsStorageKey]);
+
+  function updateEntryField(key: EntryFieldKey, patch: Partial<EntryFieldConfig>) {
+    setEntryFields((current) => {
+      const next = current.map((field) => {
+        if (field.key !== key) return field;
+        return {
+          ...field,
+          ...patch,
+          key: field.key,
+          locked: field.locked,
+          required: field.locked ? true : patch.required ?? field.required,
+          visible: field.locked ? true : patch.visible ?? field.visible,
+        };
+      });
+      if (entryFieldsStorageKey) {
+        window.localStorage.setItem(entryFieldsStorageKey, JSON.stringify(next));
+      }
+      return next;
+    });
+  }
+
   const filteredSlips = slips.filter((slip) => {
     const haystack = `${slip.slipNumber} ${slip.contributorName} ${slip.shopName ?? ''} ${slip.areaName ?? ''}`;
     return haystack.toLowerCase().includes(query.toLowerCase());
@@ -494,7 +643,15 @@ export default function App() {
 
       try {
         const parsed = JSON.parse(stored) as AuthSession;
-        await restoreSession(parsed);
+        setSession(parsed);
+        const cachedWorkspace = readWorkspaceCache(parsed);
+        if (cachedWorkspace) {
+          queryClient.setQueryData(workspaceQueryKey(parsed), cachedWorkspace);
+          applyWorkspaceBootstrap(cachedWorkspace);
+          setNotice('Showing saved data while checking for updates...');
+        }
+        setAuthReady(true);
+        await restoreSession(parsed, Boolean(cachedWorkspace));
       } catch {
         window.localStorage.removeItem(SESSION_KEY);
         setSession(null);
@@ -615,8 +772,9 @@ export default function App() {
       );
 
       setNotice('Template saved to backend successfully.');
-      await queryClient.invalidateQueries({ queryKey: workspaceQueryKey(session) });
-      void syncWorkspaceQuietly(session);
+      // The saved response is authoritative. Reconcile the rest of the workspace
+      // later so saving is not held up by another full bootstrap request.
+      scheduleWorkspaceSync(session);
     } finally {
       stopBusy();
     }
@@ -682,7 +840,7 @@ export default function App() {
         : current);
       formElement.reset();
       setNotice('Form question added.');
-      await queryClient.invalidateQueries({ queryKey: workspaceQueryKey(session) });
+      scheduleWorkspaceSync(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not add form question.');
     }
@@ -707,7 +865,7 @@ export default function App() {
           }
         : current);
       setNotice('Form question updated.');
-      await queryClient.invalidateQueries({ queryKey: workspaceQueryKey(session) });
+      scheduleWorkspaceSync(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update form question.');
     }
@@ -732,7 +890,7 @@ export default function App() {
         ? { ...current, customFields: current.customFields.filter((item) => item.id !== field.id) }
         : current);
       setNotice('Form question deleted.');
-      await queryClient.invalidateQueries({ queryKey: workspaceQueryKey(session) });
+      scheduleWorkspaceSync(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not delete form question.');
     }
@@ -789,13 +947,13 @@ export default function App() {
     whatsappWindowRef.current = null;
   }
 
-  async function createReceiptShare(slip: Slip, phone?: string | null) {
+  async function createReceiptShare(slip: Slip, phone?: string | null, manual = false) {
     if (!session || !isSlipPaid(slip)) return null;
     return apiRequest<{ auditEventId: string; expiresAt: string; ok: boolean; receiptUrl: string; sharedAt: string; whatsapp?: WhatsAppSendResult }>(
       `/vargani/slips/${slip.id}/share`,
       {
         body: JSON.stringify({
-          channel: 'WHATSAPP',
+          channel: manual ? 'MANUAL_WHATSAPP' : 'WHATSAPP',
           phone: normalizeIndianPhone(phone ?? slip.contributorPhone),
         }),
         method: 'POST',
@@ -825,18 +983,10 @@ export default function App() {
     return upload;
   }
 
-  async function restoreSession(storedSession: AuthSession) {
-    try {
-      const profile = await apiRequest<{ user: AuthSession['user'] }>('/auth/me', {}, storedSession);
-      const liveSession = { ...storedSession, user: profile.user };
-      setSession(liveSession);
-      setWorkspaceLoaded(false);
-      await loadWorkspace(liveSession);
-    } catch {
-      window.localStorage.removeItem(SESSION_KEY);
-      setSession(null);
-      setNotice('Session expired. Login again to continue.');
-    }
+  async function restoreSession(storedSession: AuthSession, hasCachedWorkspace = false) {
+    setSession(storedSession);
+    if (!hasCachedWorkspace) setWorkspaceLoaded(false);
+    await loadWorkspace(storedSession);
   }
 
   async function login(event: FormEvent<HTMLFormElement>) {
@@ -865,8 +1015,18 @@ export default function App() {
     }
   }
 
-  async function logout() {
-    if (session) await apiRequest('/auth/logout', { method: 'POST' }, session).catch(() => undefined);
+  function logout() {
+    const endingSession = session;
+    if (workspaceSyncTimerRef.current !== null) {
+      window.clearTimeout(workspaceSyncTimerRef.current);
+      workspaceSyncTimerRef.current = null;
+    }
+    if (endingSession) {
+      window.localStorage.removeItem(workspaceCacheKey(endingSession));
+      // Make logout instant locally. Server-side token revocation does not need to
+      // block navigation and keepalive lets it finish during page transitions.
+      void apiRequest('/auth/logout', { keepalive: true, method: 'POST' }, endingSession).catch(() => undefined);
+    }
     window.localStorage.removeItem(SESSION_KEY);
     window.history.replaceState(null, '', window.location.pathname + window.location.search);
     queryClient.clear();
@@ -887,18 +1047,35 @@ export default function App() {
 
   async function syncWorkspaceQuietly(currentSession = session) {
     if (!currentSession) return;
-    try {
-      const workspace = await apiRequest<WorkspaceBootstrap>('/workspace/bootstrap', {}, currentSession);
-      queryClient.setQueryData(workspaceQueryKey(currentSession), workspace);
-      applyWorkspaceBootstrap(workspace);
-      if (workspace.kind === 'MANDAL' && currentSession.user.mandalId && workspace.activeForm?.festival.id) {
-        const festivalPath = `/mandals/${currentSession.user.mandalId}/festivals/${workspace.activeForm.festival.id}`;
-        const liveTasks = await apiRequest<FestivalTask[]>(`${festivalPath}/tasks`, {}, currentSession);
-        setTasks(liveTasks);
+    if (workspaceSyncInFlightRef.current) return workspaceSyncInFlightRef.current;
+    const sync = (async () => {
+      try {
+        const workspace = await apiRequest<WorkspaceBootstrap>('/workspace/bootstrap', {}, currentSession);
+        queryClient.setQueryData(workspaceQueryKey(currentSession), workspace);
+        writeWorkspaceCache(currentSession, workspace);
+        applyWorkspaceBootstrap(workspace);
+        if (workspace.kind === 'MANDAL' && currentSession.user.mandalId && workspace.activeForm?.festival.id) {
+          const festivalPath = `/mandals/${currentSession.user.mandalId}/festivals/${workspace.activeForm.festival.id}`;
+          const liveTasks = await apiRequest<FestivalTask[]>(`${festivalPath}/tasks`, {}, currentSession);
+          setTasks(liveTasks);
+        }
+      } catch {
+        // Keep the optimistic UI. The next manual refresh will reconcile if the quiet sync fails.
       }
-    } catch {
-      // Keep the optimistic UI. The next manual refresh will reconcile if the quiet sync fails.
-    }
+    })().finally(() => {
+      workspaceSyncInFlightRef.current = null;
+    });
+    workspaceSyncInFlightRef.current = sync;
+    return sync;
+  }
+
+  function scheduleWorkspaceSync(currentSession = session, delay = 750) {
+    if (!currentSession) return;
+    if (workspaceSyncTimerRef.current !== null) window.clearTimeout(workspaceSyncTimerRef.current);
+    workspaceSyncTimerRef.current = window.setTimeout(() => {
+      workspaceSyncTimerRef.current = null;
+      void syncWorkspaceQuietly(currentSession);
+    }, delay);
   }
 
   async function loadWorkspace(currentSession = session) {
@@ -907,6 +1084,7 @@ export default function App() {
     try {
       const workspace = await apiRequest<WorkspaceBootstrap>('/workspace/bootstrap', {}, currentSession);
       queryClient.setQueryData(workspaceQueryKey(currentSession), workspace);
+      writeWorkspaceCache(currentSession, workspace);
       applyWorkspaceBootstrap(workspace);
       if (workspace.kind === 'MANDAL' && currentSession.user.mandalId && workspace.activeForm?.festival.id) {
         const festivalPath = `/mandals/${currentSession.user.mandalId}/festivals/${workspace.activeForm.festival.id}`;
@@ -942,8 +1120,16 @@ export default function App() {
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     const password = String(form.get('password') || '');
-    if (!password) {
-      setNotice('Password is required to create a member login.');
+    const name = String(form.get('name') || '').trim();
+    const email = String(form.get('email') || '').trim().toLowerCase();
+    const rawPhone = String(form.get('phone') || '').trim();
+    const normalizedPhone = normalizeIndianPhone(rawPhone);
+    if (password.length < 8) {
+      setNotice('Member password must contain at least 8 characters.');
+      return false;
+    }
+    if (rawPhone && !/^91[6-9]\d{9}$/.test(normalizedPhone)) {
+      setNotice('Enter a valid 10-digit Indian mobile number, for example 9876543210.');
       return false;
     }
     try {
@@ -951,12 +1137,12 @@ export default function App() {
         `/mandals/${mandalId}/festivals/${festivalId}/members`,
         {
           body: JSON.stringify({
-            areaName: String(form.get('areaName') || ''),
-            email: String(form.get('email') || ''),
+            areaName: String(form.get('areaName') || '').trim() || undefined,
+            email,
             groupId: String(form.get('groupId') || '') || undefined,
-            name: String(form.get('name') || ''),
+            name,
             password,
-            phone: String(form.get('phone') || ''),
+            phone: normalizedPhone ? `+${normalizedPhone}` : undefined,
             role: 'MEMBER' satisfies UserRole,
           }),
           method: 'POST',
@@ -967,7 +1153,7 @@ export default function App() {
       setMembers((current) => upsertById(current, member));
       formElement.reset();
       setNotice('Member login created successfully.');
-      void syncWorkspaceQuietly(session);
+      scheduleWorkspaceSync(session);
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not create member login.');
@@ -998,6 +1184,8 @@ export default function App() {
       locality: String(form.get('locality') || '').trim(),
       memberCount: String(form.get('memberCount') || '').trim(),
       name: mandalName,
+      slipLimit: Number(form.get('slipLimit') || 0) || null,
+      whatsappMode: String(form.get('whatsappMode') || 'AUTO_API') as 'AUTO_API' | 'MANUAL_SHARE',
     };
 
     if (!newMandal.name) {
@@ -1018,7 +1206,7 @@ export default function App() {
           logoDataUrl = await imageFileToCompressedDataUrl(logo);
         }
 
-        const created = await apiRequest<{ mandal: DemoMandal }>(
+        const created = await apiRequest<{ admin: MandalLoginUser; mandal: DemoMandal }>(
           '/mandals',
           {
             body: JSON.stringify({
@@ -1037,14 +1225,16 @@ export default function App() {
               locality: newMandal.locality || undefined,
               name: newMandal.name,
               plan: 'starter',
+              slipLimit: newMandal.slipLimit || undefined,
               state: 'Maharashtra',
+              whatsappMode: newMandal.whatsappMode,
             }),
             method: 'POST',
           },
           session,
         );
         formElement.reset();
-        setDemoMandals((current) => [mapBackendMandal(created.mandal), ...current]);
+        setDemoMandals((current) => [mapBackendMandal({ ...created.mandal, users: [created.admin] }), ...current]);
         setNotice(`${newMandal.name} added. Admin password: ${newMandal.adminPassword}`);
         return { id: created.mandal.id, ok: true };
       } catch (error) {
@@ -1057,6 +1247,81 @@ export default function App() {
 
     setNotice('Only Super Admin can add mandals.');
     return { ok: false };
+  }
+
+  async function addTemplateCustomField(label: string, required = true) {
+    const trimmedLabel = label.trim();
+    if (!session || !session.user.mandalId || !activeForm || !trimmedLabel) return;
+    const field = await apiRequest<CustomField>(
+      `/mandals/${session.user.mandalId}/festivals/${activeForm.festival.id}/custom-fields`,
+      {
+        body: JSON.stringify({
+          label: trimmedLabel,
+          printOnSlip: true,
+          required,
+          sortOrder: (activeForm.customFields?.length ?? 0) + 1,
+          type: 'TEXT',
+        }),
+        method: 'POST',
+      },
+      session,
+    );
+    setActiveForm((current) => current
+      ? { ...current, customFields: [...(current.customFields ?? []), field] }
+      : current);
+    setNotice(`${required ? 'Compulsory' : 'Optional'} template field added.`);
+    return field;
+  }
+
+  async function updateMandalDetails(mandalId: string, patch: Record<string, unknown>) {
+    if (!session || session.user.role !== 'SUPER_ADMIN') return null;
+    try {
+      const updated = await apiRequest<DemoMandal>(
+        `/mandals/${mandalId}`,
+        { body: JSON.stringify(patch), method: 'PATCH' },
+        session,
+      );
+      setDemoMandals((current) => current.map((mandal) =>
+        mandal.id === mandalId ? mapBackendMandal({ ...mandal, ...updated }) : mandal));
+      setNotice('Mandal details updated successfully.');
+      scheduleWorkspaceSync(session);
+      return updated;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not update Mandal details.');
+      return null;
+    }
+  }
+
+  async function updateMandalLogin(mandalId: string, userId: string, patch: Record<string, unknown>) {
+    if (!session || session.user.role !== 'SUPER_ADMIN') return null;
+    try {
+      const updated = await apiRequest<MandalLoginUser>(
+        `/mandals/${mandalId}/users/${userId}`,
+        { body: JSON.stringify(patch), method: 'PATCH' },
+        session,
+      );
+      setDemoMandals((current) => current.map((mandal) =>
+        mandal.id === mandalId
+          ? {
+              ...mandal,
+              adminEmail: updated.role === 'MANDAL_ADMIN' ? updated.email ?? mandal.adminEmail : mandal.adminEmail,
+              users: (mandal.users ?? []).map((user) => user.id === userId ? updated : user),
+            }
+          : mandal));
+      setNotice('Login details updated successfully.');
+      scheduleWorkspaceSync(session);
+      return updated;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not update login.');
+      return null;
+    }
+  }
+
+  function addMandalLoginToWorkspace(mandalId: string, user: MandalLoginUser) {
+    setDemoMandals((current) => current.map((mandal) =>
+      mandal.id === mandalId
+        ? { ...mandal, users: upsertById(mandal.users ?? [], user) }
+        : mandal));
   }
 
   async function archiveMandal(mandal: DemoMandal) {
@@ -1075,8 +1340,7 @@ export default function App() {
       await apiRequest(`/mandals/${mandal.id}`, { method: 'DELETE' }, session);
       setDemoMandals((current) => current.filter((item) => item.id !== mandal.id));
       setNotice(`${mandal.name} permanently deleted.`);
-      await queryClient.invalidateQueries({ queryKey: workspaceQueryKey(session) });
-      void syncWorkspaceQuietly(session);
+      scheduleWorkspaceSync(session);
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not delete mandal.');
@@ -1116,15 +1380,15 @@ export default function App() {
         {
           body: JSON.stringify({
             amount: Number(form.get('amount')),
-            areaName: String(form.get('areaName')),
-            contributorAddress: String(form.get('contributorAddress')),
-            contributorName: String(form.get('contributorName')),
+            areaName: String(form.get('areaName') || '').trim() || undefined,
+            contributorAddress: String(form.get('contributorAddress') || ''),
+            contributorName: String(form.get('contributorName') || ''),
             contributorPhone,
             customData,
             groupId: String(form.get('groupId') || '') || undefined,
             idempotencyKey: crypto.randomUUID(),
-            paymentMode: String(form.get('paymentMode')) as PaymentMode,
-            shopName: String(form.get('shopName')),
+            paymentMode: String(form.get('paymentMode') || 'CASH') as PaymentMode,
+            shopName: String(form.get('shopName') || ''),
             status: paymentStatus,
           }),
           method: 'POST',
@@ -1134,21 +1398,30 @@ export default function App() {
       setSlips((current) => [slip, ...current]);
       setSelectedSlip(slip);
       formElement.reset();
-      void syncWorkspaceQuietly(session);
       if (paymentStatus === 'PENDING') {
         setNotice(`Pending vargani entry ${slip.slipNumber} saved.`);
+        scheduleWorkspaceSync(session, 1200);
       } else {
-        try {
-          await uploadRenderedSlipImage(slip);
-          const share = await createReceiptShare(slip, contributorPhone);
-          setNotice(whatsappStatusMessage(slip, share?.whatsapp, 'generated'));
-        } catch (shareError) {
-          setNotice(
-            `Slip ${slip.slipNumber} generated, but WhatsApp could not be sent: ${
-              shareError instanceof Error ? shareError.message : 'receipt image upload failed'
-            }`,
-          );
-        }
+        setNotice(`Slip ${slip.slipNumber} generated. Preparing the receipt in the background...`);
+        void (async () => {
+          try {
+            await uploadRenderedSlipImage(slip);
+            if (currentMandal?.whatsappMode === 'MANUAL_SHARE') {
+              setNotice(`Slip ${slip.slipNumber} generated. Tap the WhatsApp button to share it manually.`);
+            } else {
+              const share = await createReceiptShare(slip, contributorPhone);
+              setNotice(whatsappStatusMessage(slip, share?.whatsapp, 'generated'));
+            }
+          } catch (shareError) {
+            setNotice(
+              `Slip ${slip.slipNumber} generated, but WhatsApp could not be sent: ${
+                shareError instanceof Error ? shareError.message : 'receipt image upload failed'
+              }`,
+            );
+          } finally {
+            scheduleWorkspaceSync(session, 1200);
+          }
+        })();
       }
       return true;
     } catch (error) {
@@ -1184,13 +1457,7 @@ export default function App() {
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      await new Promise<void>((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = () => reject(new Error('Could not load slip background image'));
-        img.src = bgUrl;
-      });
+      const img = await loadSlipBackground(bgUrl);
 
       drawContainedImage(ctx, img, canvasWidth, canvasHeight);
 
@@ -1209,6 +1476,7 @@ export default function App() {
         building_name: slip.customData?.building_name || sampleFieldValue('building_name', 'Building / Lane'),
         contributorAddress: slip.contributorAddress || sampleFieldValue('contributorAddress', 'Address'),
         contributorName: String(slip.customData?.contributorNameMr || '').trim() || slip.contributorName || sampleFieldValue('contributorName', 'Name'),
+        contributorNameMr: String(slip.customData?.contributorNameMr || '').trim() || transliterateReceiptTextToMarathi(slip.contributorName || ''),
         contributorPhone: slip.contributorPhone || sampleFieldValue('contributorPhone', 'Mobile No.'),
         createdAt: formattedDate,
         paymentMode: slip.paymentMode || 'CASH',
@@ -1334,12 +1602,32 @@ export default function App() {
       setNotice('Receipt can be shared only after payment is received.');
       return;
     }
-    startBusy('Sending WhatsApp receipt...');
+    const manualShare = currentMandal?.whatsappMode === 'MANUAL_SHARE';
+    if (manualShare) {
+      whatsappWindowRef.current = window.open('about:blank', '_blank');
+      if (whatsappWindowRef.current) whatsappWindowRef.current.opener = null;
+    }
+    startBusy(manualShare ? 'Preparing WhatsApp...' : 'Sending WhatsApp receipt...');
     try {
-      await uploadRenderedSlipImage(slip);
-      const share = await createReceiptShare(slip, slip.contributorPhone);
-      setNotice(whatsappStatusMessage(slip, share?.whatsapp, 'shared'));
+      if (!slip.receiptImageUrl) await uploadRenderedSlipImage(slip);
+      const share = await createReceiptShare(slip, slip.contributorPhone, manualShare);
+      if (manualShare && share?.receiptUrl) {
+        const phone = normalizeIndianPhone(slip.contributorPhone);
+        const message = encodeURIComponent(`Namaskar ${slip.contributorName}, your Vargani receipt ${slip.slipNumber}: ${share.receiptUrl}`);
+        const whatsappUrl = `https://wa.me/${phone}?text=${message}`;
+        if (whatsappWindowRef.current) {
+          whatsappWindowRef.current.location.href = whatsappUrl;
+        } else {
+          window.location.href = whatsappUrl;
+        }
+        whatsappWindowRef.current = null;
+        setNotice(`WhatsApp opened for slip ${slip.slipNumber}. Send it manually.`);
+      } else {
+        setNotice(whatsappStatusMessage(slip, share?.whatsapp, 'shared'));
+      }
     } catch (error) {
+      whatsappWindowRef.current?.close();
+      whatsappWindowRef.current = null;
       setNotice(error instanceof Error ? error.message : 'Could not share receipt.');
     } finally {
       stopBusy();
@@ -1469,7 +1757,7 @@ export default function App() {
       setGroups((current) => upsertById(current, group));
       formElement.reset();
       setNotice('Group created.');
-      void syncWorkspaceQuietly(session);
+      scheduleWorkspaceSync(session);
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not create group.');
@@ -1490,7 +1778,7 @@ export default function App() {
       );
       setGroups((current) => upsertById(current, group));
       setNotice('Group updated.');
-      void syncWorkspaceQuietly(session);
+      scheduleWorkspaceSync(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update group.');
     }
@@ -1630,7 +1918,7 @@ export default function App() {
       );
       setMembers((current) => upsertById(current, updatedMember));
       setNotice(isOrphanLeader ? 'Member assigned to group and old orphan leader role cleaned.' : 'Member group updated.');
-      void syncWorkspaceQuietly(session);
+      scheduleWorkspaceSync(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update member group.');
     }
@@ -1665,7 +1953,7 @@ export default function App() {
         };
       }));
       setNotice('Member permanently deleted.');
-      void syncWorkspaceQuietly(session);
+      scheduleWorkspaceSync(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not delete member.');
     }
@@ -1723,7 +2011,7 @@ export default function App() {
       );
       setSlips((current) => upsertById(current, updatedSlip));
       setNotice('Slip updated.');
-      void syncWorkspaceQuietly(session);
+      scheduleWorkspaceSync(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update slip.');
     }
@@ -1748,7 +2036,7 @@ export default function App() {
       );
       setSlips((current) => upsertById(current, cancelledSlip));
       setNotice('Slip cancelled.');
-      void syncWorkspaceQuietly(session);
+      scheduleWorkspaceSync(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not cancel slip.');
     }
@@ -1782,6 +2070,7 @@ export default function App() {
       <MemberCollectorApp
         activeForm={activeForm}
         busy={busy}
+        entryFields={entryFields}
         modalOpen={collectorModalOpen}
         notice={notice}
         onDownloadSlip={downloadSlipAsJpeg}
@@ -1815,8 +2104,11 @@ export default function App() {
         onArchiveMandal={archiveMandal}
         onLanguageChange={setLanguage}
         onLogout={logout}
+        onMandalLoginCreated={addMandalLoginToWorkspace}
         onPrompt={askPrompt}
         onTemplateSaved={saveTemplateConfig}
+        onUpdateMandal={updateMandalDetails}
+        onUpdateMandalLogin={updateMandalLogin}
         sidebarOpen={sidebarOpen}
         setSidebarOpen={setSidebarOpen}
         session={session}
@@ -1829,12 +2121,14 @@ export default function App() {
     <AdhyakshApp
       activeForm={activeForm}
       busy={busy}
+      entryFields={entryFields}
       expenses={expenses}
       groups={groups}
       members={members}
       mandal={currentMandal}
       notice={notice}
       onArchiveMember={archiveMember}
+      onAddTemplateField={addTemplateCustomField}
       onAssignMemberGroup={assignMemberGroup}
       onCancelSlip={cancelSlip}
       onCreateMember={createMember}
@@ -1859,6 +2153,7 @@ export default function App() {
       onTemplateSaved={(placements) => saveTemplateConfig(placements)}
       onTaskDone={(task) => updateTask(task, { status: 'DONE' })}
       onUpdateCustomField={updateCustomField}
+      onUpdateEntryField={updateEntryField}
       onUpdateGroup={updateGroup}
       query={query}
       session={session}
@@ -2008,6 +2303,7 @@ function AdhyakshApp({
   activeTemplate,
   activeForm,
   busy,
+  entryFields,
   expenses,
   groups,
   latestTemplateVersion,
@@ -2015,6 +2311,7 @@ function AdhyakshApp({
   members,
   notice,
   onArchiveMember,
+  onAddTemplateField,
   onAssignMemberGroup,
   onCancelSlip,
   onCreateMember,
@@ -2041,6 +2338,7 @@ function AdhyakshApp({
   onTemplateSaved,
   onTaskDone,
   onUpdateCustomField,
+  onUpdateEntryField,
   onUpdateGroup,
   query,
   session,
@@ -2057,6 +2355,7 @@ function AdhyakshApp({
   activeTemplate?: Template;
   activeForm: ActiveForm | null;
   busy: boolean;
+  entryFields: EntryFieldConfig[];
   expenses: Expense[];
   groups: Group[];
   latestTemplateVersion?: Template['versions'][number];
@@ -2064,6 +2363,7 @@ function AdhyakshApp({
   members: Member[];
   notice: string;
   onArchiveMember: (member: Member) => Promise<void> | void;
+  onAddTemplateField: (label: string, required?: boolean) => Promise<CustomField | void>;
   onAssignMemberGroup: (member: Member, groupId: string) => Promise<void> | void;
   onCancelSlip: (slip: Slip) => Promise<void> | void;
   onCreateMember: (event: FormEvent<HTMLFormElement>) => Promise<boolean | void> | boolean | void;
@@ -2090,6 +2390,7 @@ function AdhyakshApp({
   onTemplateSaved: (placements: Record<string, TemplatePlacement>) => Promise<void> | void;
   onTaskDone: (task: FestivalTask) => Promise<void> | void;
   onUpdateCustomField: (field: CustomField, patch: Partial<CustomField>) => Promise<void> | void;
+  onUpdateEntryField: (key: EntryFieldKey, patch: Partial<EntryFieldConfig>) => void;
   onUpdateGroup: (groupId: string, patch: { areaName?: string | null; leaderUserId?: string | null; name?: string }) => Promise<void> | void;
   query: string;
   session: AuthSession;
@@ -2107,6 +2408,7 @@ function AdhyakshApp({
   const [entryOpen, setEntryOpen] = useState(false);
   const [entryStatus, setEntryStatus] = useState<'ACTIVE' | 'PENDING'>('ACTIVE');
   const [memberOpen, setMemberOpen] = useState(false);
+  const [memberSubmitAttempted, setMemberSubmitAttempted] = useState(false);
   const [groupOpen, setGroupOpen] = useState(false);
   const [taskOpen, setTaskOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<FestivalTask | null>(null);
@@ -2114,12 +2416,25 @@ function AdhyakshApp({
   const [modalSubmitting, setModalSubmitting] = useState<null | 'entry' | 'expense' | 'group' | 'member' | 'task'>(null);
   const [localNotice, setLocalNotice] = useState('');
   const [slipFilter, setSlipFilter] = useState<'all' | 'paid' | 'pending'>('all');
+  const [slipCreatorFilter, setSlipCreatorFilter] = useState('');
+  const [slipDateFilter, setSlipDateFilter] = useState('');
   const mandalIdentity = getMandalIdentity(mandal, session);
   const slipRows = slips;
   const paidSlipRows = slipRows.filter(isSlipPaid);
   const pendingSlipRows = slipRows.filter((slip) => !isSlipPaid(slip));
-  const filteredSlipRows =
-    slipFilter === 'paid' ? paidSlipRows : slipFilter === 'pending' ? pendingSlipRows : slipRows;
+  const slipCreators = Array.from(
+    new Map(
+      slipRows
+        .filter((slip) => slip.collectedByUserId)
+        .map((slip) => [slip.collectedByUserId!, slip.collector?.name || 'Unknown member']),
+    ),
+  );
+  const filteredSlipRows = (
+    slipFilter === 'paid' ? paidSlipRows : slipFilter === 'pending' ? pendingSlipRows : slipRows
+  ).filter((slip) =>
+    (!slipCreatorFilter || slip.collectedByUserId === slipCreatorFilter)
+    && (!slipDateFilter || slip.createdAt.slice(0, 10) === slipDateFilter),
+  );
   const totalSlipCollection = paidSlipRows.reduce((sum, slip) => sum + Number(slip.amount || 0), 0);
   const memberUserId = getMemberUserId;
   const collectionByUser = new Map<string, number>();
@@ -2258,10 +2573,10 @@ function AdhyakshApp({
     <main className={`member-shell adhyaksh-shell ${sidebarOpen ? 'sidebar-open' : ''}`}>
       <div className="mobile-workspace-bar">
         <div className="mobile-workspace-brand">
-          {mandalIdentity.logoUrl ? <img alt="" src={mandalIdentity.logoUrl} /> : <span>{mandalIdentity.initials}</span>}
+          <img alt="Samavet" src="/samavet-logo-transparent.png" />
           <div>
-            <strong>{mandalIdentity.name}</strong>
-            <small>{mandalIdentity.location}</small>
+            <strong>ePawati</strong>
+            <small>{mandalIdentity.name}</small>
           </div>
         </div>
         <button className="mobile-menu-toggle" onClick={() => setSidebarOpen((open) => !open)} type="button">
@@ -2270,6 +2585,10 @@ function AdhyakshApp({
       </div>
       {sidebarOpen && <button aria-label="Close menu" className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} type="button" />}
       <aside className="member-sidebar adhyaksh-sidebar">
+        <div className="portal-brand">
+          <img alt="Samavet" src="/samavet-logo-transparent.png" />
+          <div><strong>Samavet</strong><span>ePawati</span></div>
+        </div>
         <div className="mandal-identity">
           {mandalIdentity.logoUrl ? <img alt="" className="mandal-avatar-img" src={mandalIdentity.logoUrl} /> : <span className="mandal-seal">{mandalIdentity.initials}</span>}
           <div>
@@ -2326,10 +2645,10 @@ function AdhyakshApp({
           <section className="adhyaksh-page">
             <div className="wide-card action-card">
               <div>
-                <h2>Member Directory (2026)</h2>
-                <span>Track member vargani commitments and payment status.</span>
+                <h2>Member directory</h2>
+                <span>Manage members, groups and annual contribution records.</span>
               </div>
-              <button className="blue-action" onClick={() => setMemberOpen(true)} type="button"><Plus size={18} />Add Member</button>
+              <button className="blue-action" onClick={() => { setMemberSubmitAttempted(false); setMemberOpen(true); }} type="button"><Plus size={18} />Add Member</button>
             </div>
             <div className="metric-strip six">
               <Metric label="Total Members" value={metricValue(String(memberRows.length))} />
@@ -2341,8 +2660,8 @@ function AdhyakshApp({
             </div>
             <div className="wide-card groups-card">
               <div>
-                <h2>Collection Groups</h2>
-                <span>Create area-wise teams, assign a leader, and attach members or tasks to that group.</span>
+                <h2>Collection groups</h2>
+                <span>Organize area-wise teams and assign collection leaders.</span>
               </div>
               <button className="blue-action" onClick={() => setGroupOpen(true)} type="button"><Plus size={18} />Add Group</button>
               <div className="group-list">
@@ -2484,7 +2803,7 @@ function AdhyakshApp({
               activeForm={activeForm}
               activeTemplate={activeTemplate}
               latestTemplateVersion={latestTemplateVersion}
-              onAddField={() => undefined}
+              onAddField={onAddTemplateField}
               onPreviewChange={onPreviewChange}
               onPrompt={onPrompt}
               onSaveTemplate={saveTemplate}
@@ -2500,7 +2819,7 @@ function AdhyakshApp({
               <button className="blue-action" onClick={() => setEntryOpen(true)} type="button"><Plus size={18} />New Vargani Entry</button>
             </div>
             <div className="metric-strip five-cols">
-              <Metric label="Total Entries" value={metricValue(String(slipRows.length))} />
+              <Metric label="Total Entries" note={metricNote(mandal?.slipLimit ? `Plan limit: ${mandal.slipLimit} slips` : 'Unlimited plan')} value={metricValue(String(slipRows.length))} />
               <Metric green label="Collected" note={metricNote(`${paidSlipRows.length} Paid`)} value={metricValue(money(totalSlipCollection))} />
               <Metric red label="Pending" note={metricNote(`${pendingSlipRows.length} Pending`)} value={metricValue(money(pendingSlipRows.reduce((sum, slip) => sum + Number(slip.amount || 0), 0)))} />
               <Metric green label="Paid Slips" value={metricValue(String(paidSlipRows.length))} />
@@ -2526,20 +2845,32 @@ function AdhyakshApp({
                 <button className={slipFilter === 'paid' ? 'active' : ''} onClick={() => setSlipFilter('paid')} type="button">Paid ({paidSlipRows.length})</button>
                 <button className={slipFilter === 'pending' ? 'active' : ''} onClick={() => setSlipFilter('pending')} type="button">Pending ({pendingSlipRows.length})</button>
               </div>
+              <label className="slip-filter-control">
+                <span>Created by</span>
+                <select onChange={(event) => setSlipCreatorFilter(event.target.value)} value={slipCreatorFilter}>
+                  <option value="">All members</option>
+                  {slipCreators.map(([userId, name]) => <option key={userId} value={userId}>{name}</option>)}
+                </select>
+              </label>
+              <label className="slip-filter-control">
+                <span>Date</span>
+                <input onChange={(event) => setSlipDateFilter(event.target.value)} type="date" value={slipDateFilter} />
+              </label>
               <label className="search-inline"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by name, location, admin, date..." /></label>
             </div>
             <div className="ops-table slips-table">
-              <div className="ops-head six"><span>Slip #</span><span>Name / Shop</span><span>Amount</span><span>Mobile</span><span>Status / Mode</span><span>Date / Info</span><span>Actions</span></div>
+              <div className="ops-head six"><span>Slip #</span><span>Name / Shop</span><span>Amount</span><span>Mobile</span><span>Status / Mode</span><span>Date / Created By</span><span>Actions</span></div>
               {isInitialSync && <EmptyTableState message="Loading live slip data..." />}
               {workspaceLoaded && filteredSlipRows.length === 0 && <EmptyTableState message="No slips found for this filter." />}
               {filteredSlipRows.map((slip) => (
                 <div className="ops-row six" key={slip.id}>
                   <b>{slip.slipNumber}</b><strong>{slip.contributorName}<small>{slip.shopName ?? '-'}</small></strong><b>{money(Number(slip.amount))}</b><span>{slip.contributorPhone ?? '-'}</span>
-                  <span><i className={isSlipPaid(slip) ? 'pill paid' : 'pill pending'}>{isSlipPaid(slip) ? 'Paid' : 'Pending'}</i><i className="pill mode">{slip.paymentMode}</i></span><span>{slip.createdAt.slice(0, 10)}</span>
+                  <span><i className={isSlipPaid(slip) ? 'pill paid' : 'pill pending'}>{isSlipPaid(slip) ? 'Paid' : 'Pending'}</i><i className="pill mode">{slip.paymentMode}</i></span>
+                  <span>{new Date(slip.createdAt).toLocaleDateString('en-IN')}<small>Created by {slip.collector?.name || 'Unknown user'}</small></span>
                   <span className="row-actions">
                     <button onClick={() => { setSelectedSlip(slip); void onEditSlip(slip); }} type="button"><Edit3 size={16} />Edit</button>
                     <button className="mini-link" onClick={() => { setSelectedSlip(slip); void onDownloadSlip(slip); }} type="button"><Download size={16} />Slip</button>
-                    <button onClick={() => { setSelectedSlip(slip); void onShareSlip(slip); }} type="button"><Share2 size={16} />Share</button>
+                    <button className="whatsapp-action" onClick={() => { setSelectedSlip(slip); void onShareSlip(slip); }} type="button"><WhatsAppIcon />WhatsApp</button>
                     <button onClick={() => void onCancelSlip(slip)} type="button"><Trash2 size={16} /></button>
                   </span>
                 </div>
@@ -2552,10 +2883,12 @@ function AdhyakshApp({
           <FormManagementView
             activeForm={activeForm}
             busy={busy}
+            entryFields={entryFields}
             onCreateField={onCreateCustomField}
             onDeleteField={onDeleteCustomField}
             onPrompt={onPrompt}
             onUpdateField={onUpdateCustomField}
+            onUpdateEntryField={onUpdateEntryField}
           />
         )}
 
@@ -2624,26 +2957,12 @@ function AdhyakshApp({
           }}>
             <button className="modal-close" disabled={modalSubmitting === 'entry'} onClick={() => setEntryOpen(false)} type="button"><X size={20} /></button>
             <h2>New Vargani Entry</h2>
-            <ContributorNameFields />
-            <label>Shop Name<input name="shopName" placeholder="Enter shop / business name" /></label>
-            <label>Amount<input name="amount" inputMode="numeric" required placeholder="1500" /></label>
-            <label>Location<input name="areaName" required placeholder="Main Road, Pune" /></label>
-            <label>
-              Collection Group
-              <select name="groupId" defaultValue="">
-                <option value="">No group</option>
-                {groups.map((group) => (
-                  <option key={group.id} value={group.id}>{group.name}{group.areaName ? ` - ${group.areaName}` : ''}</option>
-                ))}
-              </select>
-            </label>
-            <label>Address<textarea name="contributorAddress" placeholder="Full address optional" /></label>
-            <label>WhatsApp Number<input name="contributorPhone" placeholder="10 digit WhatsApp number" /></label>
-            <PaymentStatusSelector value={entryStatus} onChange={setEntryStatus} />
-            <label>Payment Mode<select name="paymentMode" defaultValue="CASH"><option value="CASH">Cash</option><option value="UPI">Online / UPI</option><option value="CHEQUE">Cheque</option></select></label>
-            {entryStatus === 'PENDING' && (
-              <label className="pending-date-card">Tentative Payment Date<input name="tentativePaymentDate" type="date" /></label>
-            )}
+            <EntryCoreFields
+              entryFields={entryFields}
+              entryStatus={entryStatus}
+              groups={groups}
+              onEntryStatusChange={setEntryStatus}
+            />
             {(activeForm?.customFields ?? []).map((field) => <CustomFieldInput field={field} key={field.id} />)}
             <div className="modal-actions"><button disabled={modalSubmitting === 'entry'} type="button" onClick={() => setEntryOpen(false)}>Cancel</button><button className={entryStatus === 'PENDING' ? 'pending-action' : 'success'} disabled={modalSubmitting === 'entry'} onClick={(event) => { if (event.currentTarget.form?.checkValidity()) onPrepareWhatsApp(entryStatus); }} type="submit">{entryStatus === 'PENDING' ? <Clock size={18} /> : <CheckCircle2 size={18} />}{modalSubmitting === 'entry' ? 'Saving...' : entryStatus === 'PENDING' ? 'Save as Pending' : 'Confirm & Generate Slip'}</button></div>
           </form>
@@ -2755,6 +3074,7 @@ function AdhyakshApp({
       {memberOpen && (
         <div className="modal-backdrop">
           <form className="vargani-modal adhyaksh-modal" onSubmit={async (event) => {
+            setMemberSubmitAttempted(true);
             setModalSubmitting('member');
             try {
               const ok = await onCreateMember(event);
@@ -2763,16 +3083,23 @@ function AdhyakshApp({
               setModalSubmitting(null);
             }
           }}>
-            <button className="modal-close" disabled={modalSubmitting === 'member'} onClick={() => setMemberOpen(false)} type="button"><X size={20} /></button>
+            <button className="modal-close" disabled={modalSubmitting === 'member'} onClick={() => { setMemberSubmitAttempted(false); setMemberOpen(false); }} type="button"><X size={20} /></button>
             <h2>Add Member</h2>
             <p className="modal-help">Create member login here. Make someone a group leader from Collection Groups.</p>
-            <label>Name<input name="name" required placeholder="Member name" /></label>
-            <label>Email<input name="email" required placeholder="member@mandal.local" /></label>
-            <label>Phone<input name="phone" placeholder="+91..." /></label>
-            <label>Password<input name="password" required placeholder="Create a strong password" type="password" /></label>
+            {memberSubmitAttempted && notice && <div className="member-create-feedback" role="alert">{notice}</div>}
+            <label>Member Name<input name="name" required placeholder="Member name" /></label>
+            <label>Login Username (Email)<input autoComplete="username" name="email" required placeholder="member@example.com" type="email" /></label>
+            <label>
+              Mobile Number (Optional)
+              <span className="phone-input-group">
+                <b>+91</b>
+                <input inputMode="numeric" maxLength={10} name="phone" pattern="[6-9][0-9]{9}" placeholder="9876543210" title="Enter a valid 10-digit Indian mobile number" type="tel" />
+              </span>
+            </label>
+            <label>Login Password<input autoComplete="new-password" minLength={8} name="password" required placeholder="Minimum 8 characters" type="password" /></label>
             <label>Group<select name="groupId"><option value="">No group</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
             <label>Area<input name="areaName" placeholder="Market Area" /></label>
-            <div className="modal-actions"><button disabled={modalSubmitting === 'member'} type="button" onClick={() => setMemberOpen(false)}>Cancel</button><button className="blue-action" disabled={modalSubmitting === 'member'} type="submit">{modalSubmitting === 'member' ? 'Creating...' : 'Create Member Login'}</button></div>
+            <div className="modal-actions"><button disabled={modalSubmitting === 'member'} type="button" onClick={() => { setMemberSubmitAttempted(false); setMemberOpen(false); }}>Cancel</button><button className="blue-action" disabled={modalSubmitting === 'member'} type="submit">{modalSubmitting === 'member' ? 'Creating...' : 'Create Member Login'}</button></div>
           </form>
         </div>
       )}
@@ -2823,7 +3150,76 @@ function EmptyTableState({ message }: { message: string }) {
   );
 }
 
-function ContributorNameFields() {
+function EntryCoreFields({
+  entryFields,
+  entryStatus,
+  groups = [],
+  onEntryStatusChange,
+}: {
+  entryFields: EntryFieldConfig[];
+  entryStatus: 'ACTIVE' | 'PENDING';
+  groups?: Group[];
+  onEntryStatusChange: (status: 'ACTIVE' | 'PENDING') => void;
+}) {
+  const field = (key: EntryFieldKey) =>
+    entryFields.find((item) => item.key === key) ?? DEFAULT_ENTRY_FIELDS.find((item) => item.key === key)!;
+  const visible = (key: EntryFieldKey) => field(key).visible;
+  const label = (key: EntryFieldKey) => `${field(key).label}${field(key).required ? ' *' : ''}`;
+
+  return (
+    <>
+      <ContributorNameFields
+        marathiField={field('contributorNameMr')}
+        nameField={field('contributorName')}
+      />
+      {visible('shopName') && <label>{label('shopName')}<input name="shopName" required={field('shopName').required} placeholder="Enter shop / business name" /></label>}
+      {visible('amount') && <label>{label('amount')}<input inputMode="numeric" name="amount" required={field('amount').required} placeholder="1500" /></label>}
+      {visible('areaName') && <label>{label('areaName')}<input name="areaName" required={field('areaName').required} placeholder="Main Road, Pune" /></label>}
+      {visible('groupId') && (
+        <label>
+          {label('groupId')}
+          <select name="groupId" required={field('groupId').required} defaultValue="">
+            <option value="">No group</option>
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>{group.name}{group.areaName ? ` - ${group.areaName}` : ''}</option>
+            ))}
+          </select>
+        </label>
+      )}
+      {visible('contributorAddress') && <label>{label('contributorAddress')}<textarea name="contributorAddress" required={field('contributorAddress').required} placeholder="Full address optional" /></label>}
+      {visible('contributorPhone') && <label>{label('contributorPhone')}<input name="contributorPhone" required={field('contributorPhone').required} placeholder="10 digit WhatsApp number" /></label>}
+      {visible('paymentStatus') ? (
+        <PaymentStatusSelector value={entryStatus} onChange={onEntryStatusChange} />
+      ) : (
+        <input name="paymentStatus" type="hidden" value="ACTIVE" />
+      )}
+      {visible('paymentMode') ? (
+        <label>
+          {label('paymentMode')}
+          <select name="paymentMode" required={field('paymentMode').required} defaultValue="CASH">
+            <option value="CASH">Cash</option>
+            <option value="UPI">Online / UPI</option>
+            <option value="CHEQUE">Cheque</option>
+            <option value="BANK_TRANSFER">Bank Transfer</option>
+          </select>
+        </label>
+      ) : (
+        <input name="paymentMode" type="hidden" value="CASH" />
+      )}
+      {entryStatus === 'PENDING' && visible('tentativePaymentDate') && (
+        <label className="pending-date-card">{label('tentativePaymentDate')}<input name="tentativePaymentDate" required={field('tentativePaymentDate').required} type="date" /></label>
+      )}
+    </>
+  );
+}
+
+function ContributorNameFields({
+  marathiField = DEFAULT_ENTRY_FIELDS[1],
+  nameField = DEFAULT_ENTRY_FIELDS[0],
+}: {
+  marathiField?: EntryFieldConfig;
+  nameField?: EntryFieldConfig;
+}) {
   const [name, setName] = useState('');
   const [marathiName, setMarathiName] = useState('');
   const [manualMarathi, setManualMarathi] = useState(false);
@@ -2844,8 +3240,8 @@ function ContributorNameFields() {
 
   return (
     <>
-      <label>Name *<input name="contributorName" onChange={(event) => updateName(event.currentTarget.value)} required placeholder="Enter full name" value={name} /></label>
-      <label>Name on Marathi Slip<input name="contributorNameMr" onChange={(event) => updateMarathiName(event.currentTarget.value)} placeholder="Auto Marathi name" value={marathiName} /></label>
+      {nameField.visible && <label>{nameField.label}{nameField.required ? ' *' : ''}<input name="contributorName" onChange={(event) => updateName(event.currentTarget.value)} required={nameField.required} placeholder="Enter full name" value={name} /></label>}
+      {marathiField.visible && <label>{marathiField.label}{marathiField.required ? ' *' : ''}<input name="contributorNameMr" onChange={(event) => updateMarathiName(event.currentTarget.value)} required={marathiField.required} placeholder="Auto Marathi name" value={marathiName} /></label>}
     </>
   );
 }
@@ -2896,17 +3292,21 @@ function CustomFieldInput({ field }: { field: CustomField }) {
 function FormManagementView({
   activeForm,
   busy,
+  entryFields,
   onCreateField,
   onDeleteField,
   onPrompt,
   onUpdateField,
+  onUpdateEntryField,
 }: {
   activeForm: ActiveForm | null;
   busy: boolean;
+  entryFields: EntryFieldConfig[];
   onCreateField: (event: FormEvent<HTMLFormElement>) => Promise<void> | void;
   onDeleteField: (field: CustomField) => Promise<void> | void;
   onPrompt: (options: ThemedPromptOptions) => Promise<string | null>;
   onUpdateField: (field: CustomField, patch: Partial<CustomField>) => Promise<void> | void;
+  onUpdateEntryField: (key: EntryFieldKey, patch: Partial<EntryFieldConfig>) => void;
 }) {
   const fields = [...(activeForm?.customFields ?? [])].sort((a, b) => a.sortOrder - b.sortOrder);
 
@@ -2951,22 +3351,65 @@ function FormManagementView({
         <div className="form-management-card current-questions-card">
           <div>
             <h3>Current Form Questions</h3>
-            <p>Core receipt fields stay fixed for audit accuracy. Custom questions below are fully configurable.</p>
+            <p>Every field used by New Vargani Entry is listed here. Rename questions, change optional fields, or remove fields this mandal does not use.</p>
           </div>
+          <h4 className="managed-fields-title">Standard Vargani Questions</h4>
           <div className="managed-fields-table">
-            <div className="managed-fields-head">
-              <span>ID</span>
+            <div className="managed-fields-head question-fields-head">
+              <span>Question shown on form</span>
               <span>Type</span>
               <span>Required</span>
-              <span>English Label</span>
+            </div>
+            {entryFields.filter((field) => field.visible).map((field) => (
+              <div className="managed-fields-row question-display-row" key={field.key}>
+                <span className="managed-question-label">{field.label}</span>
+                <span>{field.type}</span>
+                <strong>{field.required ? 'Yes' : 'No'}</strong>
+                <span className="row-actions managed-field-actions">
+                  <button onClick={async () => {
+                      const nextLabel = (await onPrompt({
+                        defaultValue: field.label,
+                        placeholder: 'Enter question label',
+                        title: 'Edit question label',
+                      }))?.trim();
+                      if (nextLabel && nextLabel !== field.label) onUpdateEntryField(field.key, { label: nextLabel });
+                    }} type="button">
+                    <Edit3 size={16} />Edit
+                  </button>
+                  <button
+                    disabled={field.locked}
+                    onClick={() => onUpdateEntryField(field.key, { required: !field.required })}
+                    title={field.locked ? 'Required for receipt generation' : undefined}
+                    type="button"
+                  >
+                    {field.locked ? 'Required for Receipt' : field.required ? 'Make Optional' : 'Make Compulsory'}
+                  </button>
+                  <button
+                    className="danger"
+                    disabled={field.locked}
+                    onClick={() => onUpdateEntryField(field.key, { visible: false })}
+                    title={field.locked ? 'This field is required for receipt generation' : undefined}
+                    type="button"
+                  >
+                    <Trash2 size={16} />{field.locked ? 'Protected' : 'Remove'}
+                  </button>
+                </span>
+              </div>
+            ))}
+          </div>
+          <h4 className="managed-fields-title">Custom Questions</h4>
+          <div className="managed-fields-table">
+            <div className="managed-fields-head question-fields-head">
+              <span>Question shown on form</span>
+              <span>Type</span>
+              <span>Required</span>
             </div>
             {fields.length === 0 && <EmptyTableState message="No custom form questions added yet." />}
             {fields.map((field) => (
-              <div className="managed-fields-row" key={field.id}>
-                <code>{field.key}</code>
+              <div className="managed-fields-row question-display-row" key={field.id}>
+                <span className="managed-question-label">{field.label}</span>
                 <span>{field.type.replace('_', ' ')}</span>
                 <strong>{field.required ? 'Yes' : 'No'}</strong>
-                <span>{field.label}</span>
                 <span className="row-actions managed-field-actions">
                   <button
                     onClick={async () => {
@@ -3042,9 +3485,12 @@ function SuperAdminApp({
   onCreateMandal,
   onLanguageChange,
   onLogout,
+  onMandalLoginCreated,
   onPreviewChange,
   onPrompt,
   onTemplateSaved,
+  onUpdateMandal,
+  onUpdateMandalLogin,
   session,
   setSidebarOpen,
   sidebarOpen,
@@ -3057,12 +3503,15 @@ function SuperAdminApp({
   onCreateMandal: (event: FormEvent<HTMLFormElement>) => Promise<{ id?: string; ok: boolean }>;
   onLanguageChange: (language: Language) => void;
   onLogout: () => void;
+  onMandalLoginCreated: (mandalId: string, user: MandalLoginUser) => void;
   onPreviewChange: (url: string) => void;
   onPrompt: (options: ThemedPromptOptions) => Promise<string | null>;
   onTemplateSaved: (
     placements: Record<string, TemplatePlacement>,
     target?: { festivalId?: string; mandalId?: string; previewUrl?: string },
   ) => Promise<void> | void;
+  onUpdateMandal: (mandalId: string, patch: Record<string, unknown>) => Promise<DemoMandal | null>;
+  onUpdateMandalLogin: (mandalId: string, userId: string, patch: Record<string, unknown>) => Promise<MandalLoginUser | null>;
   session: AuthSession;
   setSidebarOpen: (open: boolean | ((current: boolean) => boolean)) => void;
   sidebarOpen: boolean;
@@ -3081,7 +3530,9 @@ function SuperAdminApp({
   const [ownerQuery, setOwnerQuery] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginMessage, setLoginMessage] = useState('');
-  const [mandalLogins, setMandalLogins] = useState<Record<string, Array<{ role: string; username: string; password: string }>>>({});
+  const [editingLogin, setEditingLogin] = useState<MandalLoginUser | null>(null);
+  const [mandalEditBusy, setMandalEditBusy] = useState(false);
+  const [mandalLogins, setMandalLogins] = useState<Record<string, Array<{ name?: string; password: string; role: string; userId?: string; username: string }>>>({});
   const [ownerTemplateDrafts, setOwnerTemplateDrafts] = useState<Record<string, string>>({});
   const selectedMandal = mandals[Math.min(selectedIndex, mandals.length - 1)];
   const selectedKey = selectedMandal?.id ?? selectedMandal?.name ?? '';
@@ -3096,14 +3547,17 @@ function SuperAdminApp({
     activeUsers
       .filter((user) => user.role !== 'MANDAL_ADMIN')
       .map((user) => ({
+        name: user.name,
         password: 'Stored securely in backend',
         role: user.role.replaceAll('_', ' '),
+        userId: user.id,
         username: user.email || user.phone || user.name,
       }));
   const ownerLoginRows = [
     {
       password: selectedMandal?.adminPassword || 'Stored securely in backend',
       role: 'Adhyaksh',
+      userId: adminUser?.id,
       username: selectedMandal?.adminEmail || adminUser?.email || adminUser?.phone || (selectedMandal ? `admin@${slugify(selectedMandal.name)}.local` : ''),
     },
     ...extraLogins,
@@ -3220,6 +3674,28 @@ function SuperAdminApp({
     onPreviewChange(resolvedUrl);
   }
 
+  async function addOwnerTemplateField(label: string, required = true) {
+    const mandalId = selectedMandal?.id;
+    const festivalId = selectedMandal?.festivals?.[0]?.id;
+    const trimmedLabel = label.trim();
+    if (!mandalId || !festivalId || !trimmedLabel) {
+      throw new Error('Open a Mandal with an active festival before adding a custom field.');
+    }
+    return apiRequest<CustomField>(
+      `/mandals/${mandalId}/festivals/${festivalId}/custom-fields`,
+      {
+        body: JSON.stringify({
+          label: trimmedLabel,
+          printOnSlip: true,
+          required,
+          type: 'TEXT',
+        }),
+        method: 'POST',
+      },
+      session,
+    );
+  }
+
   async function createLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedMandal?.id) return;
@@ -3259,12 +3735,15 @@ function SuperAdminApp({
         },
         session,
       );
+      onMandalLoginCreated(selectedMandal.id, createdUser);
       setMandalLogins((current) => ({
         ...current,
         [selectedKey]: [
           {
+            name: createdUser.name,
             password: nextLogin.password,
             role: createdUser.role.replaceAll('_', ' '),
+            userId: createdUser.id,
             username: createdUser.email || createdUser.phone || nextLogin.username,
           },
           ...(current[selectedKey] ?? []),
@@ -3276,6 +3755,80 @@ function SuperAdminApp({
       setLoginMessage(error instanceof Error ? error.message : 'Could not create login.');
     } finally {
       setLoginBusy(false);
+    }
+  }
+
+  async function saveMandalDetails(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedMandal?.id) return;
+    const form = new FormData(event.currentTarget);
+    const rawPhone = String(form.get('contactPhone') || '').trim();
+    const contactPhone = normalizeOptionalIndianPhone(rawPhone);
+    if (rawPhone && !contactPhone) {
+      setLoginMessage('Enter a valid 10-digit Indian contact number.');
+      return;
+    }
+    const logo = form.get('logo');
+    setMandalEditBusy(true);
+    try {
+      const logoDataUrl = logo instanceof File && logo.size > 0
+        ? await imageFileToCompressedDataUrl(logo)
+        : undefined;
+      const updated = await onUpdateMandal(selectedMandal.id, {
+        address: String(form.get('address') || '').trim() || null,
+        city: String(form.get('city') || '').trim() || null,
+        contactName: String(form.get('contactName') || '').trim() || null,
+        contactPhone: contactPhone || null,
+        locality: String(form.get('locality') || '').trim() || null,
+        logoDataUrl,
+        name: String(form.get('name') || '').trim(),
+        nameMr: String(form.get('nameMr') || '').trim() || null,
+        plan: String(form.get('plan') || 'starter'),
+        slipLimit: Number(form.get('slipLimit') || 0) || null,
+        state: String(form.get('state') || '').trim() || null,
+        whatsappMode: String(form.get('whatsappMode') || 'AUTO_API'),
+      });
+      setLoginMessage(updated ? 'Mandal profile saved.' : 'Could not save Mandal profile.');
+    } catch (error) {
+      setLoginMessage(error instanceof Error ? error.message : 'Could not save Mandal profile.');
+    } finally {
+      setMandalEditBusy(false);
+    }
+  }
+
+  async function saveEditedLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedMandal?.id || !editingLogin) return;
+    const form = new FormData(event.currentTarget);
+    const email = String(form.get('email') || '').trim().toLowerCase();
+    const rawPhone = String(form.get('phone') || '').trim();
+    const phone = normalizeOptionalIndianPhone(rawPhone);
+    const password = String(form.get('password') || '');
+    if (!email && !phone) {
+      setLoginMessage('Enter an email username or mobile number.');
+      return;
+    }
+    if (rawPhone && !phone) {
+      setLoginMessage('Enter a valid 10-digit Indian mobile number.');
+      return;
+    }
+    if (password && password.length < 8) {
+      setLoginMessage('New password must contain at least 8 characters.');
+      return;
+    }
+
+    setLoginBusy(true);
+    const updated = await onUpdateMandalLogin(selectedMandal.id, editingLogin.id, {
+      email: email || undefined,
+      name: String(form.get('name') || '').trim(),
+      password: password || undefined,
+      phone: phone || undefined,
+      role: editingLogin.role === 'MANDAL_ADMIN' ? 'MANDAL_ADMIN' : String(form.get('role') || editingLogin.role),
+    });
+    setLoginBusy(false);
+    if (updated) {
+      setEditingLogin(null);
+      setLoginMessage('Login username and password updated.');
     }
   }
 
@@ -3406,6 +3959,8 @@ function SuperAdminApp({
                 <label>{t(language, 'Phone No.')}<input name="contactPhone" placeholder="+919876543210" /></label>
                 <label>Contact Email<input name="contactEmail" placeholder="contact@mandal.local" /></label>
                 <label>No. of Members<input name="memberCount" inputMode="numeric" placeholder="50" /></label>
+                <label>Slip Generation Limit *<input inputMode="numeric" min={1} name="slipLimit" required placeholder="e.g. 1000" type="number" /></label>
+                <label>WhatsApp Delivery<select defaultValue="AUTO_API" name="whatsappMode"><option value="AUTO_API">Automatic — Paid API</option><option value="MANUAL_SHARE">Manual — Open WhatsApp App</option></select></label>
                 <label>Adhyaksh Name<input name="adhyakshName" placeholder="Main admin name" /></label>
                 <label>Adhyaksh Email *<input name="adminEmail" required placeholder="admin@mandal.local" /></label>
                 <label className="full">Adhyaksh Password *<input name="adminPassword" required type="password" placeholder="Minimum 12 characters" /></label>
@@ -3444,6 +3999,28 @@ function SuperAdminApp({
 
               {detailTab === 'overview' && (
                 <section className="owner-overview">
+                  <form className="card form-grid mandal-edit-card" onSubmit={saveMandalDetails}>
+                    <div className="panel-title full">
+                      <Edit3 size={22} />
+                      <div>
+                        <strong>Edit Mandal Details</strong>
+                        <span>Update identity, address, contact information, plan, and logo.</span>
+                      </div>
+                    </div>
+                    <label>Mandal Name<input defaultValue={selectedMandal.name} name="name" required /></label>
+                    <label>Marathi Name<input defaultValue={selectedMandal.nameMr ?? ''} name="nameMr" /></label>
+                    <label className="full">Address<input defaultValue={selectedMandal.address ?? ''} name="address" /></label>
+                    <label>Locality<input defaultValue={selectedMandal.locality ?? ''} name="locality" /></label>
+                    <label>City<input defaultValue={selectedMandal.city ?? ''} name="city" /></label>
+                    <label>State<input defaultValue={selectedMandal.state ?? 'Maharashtra'} name="state" /></label>
+                    <label>Plan<select defaultValue={selectedMandal.plan ?? 'starter'} name="plan"><option value="starter">Starter</option><option value="standard">Standard</option><option value="premium">Premium</option></select></label>
+                    <label>Slip Generation Limit<input defaultValue={selectedMandal.slipLimit ?? ''} inputMode="numeric" min={1} name="slipLimit" placeholder="Unlimited when blank" type="number" /></label>
+                    <label>WhatsApp Delivery<select defaultValue={selectedMandal.whatsappMode ?? 'AUTO_API'} name="whatsappMode"><option value="AUTO_API">Automatic — Paid API</option><option value="MANUAL_SHARE">Manual — Open WhatsApp App</option></select></label>
+                    <label>Contact / Adhyaksh Name<input defaultValue={selectedMandal.contactName ?? selectedMandal.adhyakshName ?? ''} name="contactName" /></label>
+                    <label>Contact Number<input defaultValue={selectedMandal.contactPhone ?? ''} inputMode="tel" name="contactPhone" placeholder="10-digit mobile number" /></label>
+                    <label className="full">Replace Mandal Logo<input accept="image/*" name="logo" type="file" /></label>
+                    <button className="primary full" disabled={mandalEditBusy} type="submit">{mandalEditBusy ? 'Saving Mandal...' : 'Save Mandal Details'}</button>
+                  </form>
                   <div className="login-card">
                     <div className="panel-title">
                       <ShieldCheck size={22} />
@@ -3455,6 +4032,7 @@ function SuperAdminApp({
                     <StatusLine label={t(language, 'Login URL')} value={mandalLoginUrl()} />
                     <StatusLine label={t(language, 'Username')} value={ownerLoginRows[0]?.username || `admin@${slugify(selectedMandal.name)}.local`} />
                     <StatusLine label={t(language, 'Password')} value={selectedMandal.adminPassword || 'Stored securely in backend'} />
+                    {adminUser && <button className="owner-edit-login-button" onClick={() => setEditingLogin(adminUser)} type="button"><Edit3 size={16} />Edit Adhyaksh Username / Password</button>}
                   </div>
                   <form className="card form-grid" onSubmit={createLogin}>
                     <div className="panel-title full">
@@ -3478,7 +4056,15 @@ function SuperAdminApp({
                         <strong>{login.role}</strong>
                         <span>{login.username}</span>
                         <em>{login.password}</em>
-                        <button onClick={() => copyLogin(login)} type="button"><Copy size={16} />Copy</button>
+                        <span className="row-actions">
+                          {login.userId && (
+                            <button onClick={() => {
+                              const user = activeUsers.find((item) => item.id === login.userId);
+                              if (user) setEditingLogin(user);
+                            }} type="button"><Edit3 size={16} />Edit</button>
+                          )}
+                          <button onClick={() => copyLogin(login)} type="button"><Copy size={16} />Copy</button>
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -3490,7 +4076,7 @@ function SuperAdminApp({
                   activeForm={null}
                   language={language}
                   latestTemplateVersion={selectedTemplateVersion}
-                  onAddField={() => undefined}
+                  onAddField={addOwnerTemplateField}
                   onPreviewChange={handleOwnerTemplatePreviewChange}
                   onPrompt={onPrompt}
                   onSaveTemplate={async (placements) => {
@@ -3513,7 +4099,38 @@ function SuperAdminApp({
         )}
       </section>
     </main>
-    {loginBusy && <ActionLoaderOverlay message="Creating login..." />}
+    {editingLogin && (
+      <div className="modal-backdrop">
+        <form className="vargani-modal owner-login-edit-modal" onSubmit={saveEditedLogin}>
+          <button className="modal-close" disabled={loginBusy} onClick={() => setEditingLogin(null)} type="button"><X size={20} /></button>
+          <div className="panel-title">
+            <UserCog size={22} />
+            <div>
+              <strong>Edit Login</strong>
+              <span>Change username, account name, role, mobile number, or reset the password.</span>
+            </div>
+          </div>
+          <label>Name<input defaultValue={editingLogin.name} name="name" required /></label>
+          <label>Username (Email)<input defaultValue={editingLogin.email ?? ''} name="email" placeholder="user@mandal.local" type="email" /></label>
+          <label>Mobile Login<input defaultValue={editingLogin.phone ?? ''} inputMode="tel" name="phone" placeholder="10-digit mobile number" /></label>
+          <label>
+            Role
+            <select defaultValue={editingLogin.role} disabled={editingLogin.role === 'MANDAL_ADMIN'} name="role">
+              <option value="MANDAL_ADMIN">Adhyaksh / Mandal Admin</option>
+              <option value="KHAJINDAR">Khajindar</option>
+              <option value="GROUP_LEADER">Group Leader / Karyakari</option>
+              <option value="MEMBER">Member</option>
+            </select>
+          </label>
+          <label>New Password<input autoComplete="new-password" minLength={8} name="password" placeholder="Leave blank to keep current password" type="password" /></label>
+          <div className="modal-actions">
+            <button disabled={loginBusy} onClick={() => setEditingLogin(null)} type="button">Cancel</button>
+            <button className="primary" disabled={loginBusy} type="submit">{loginBusy ? 'Saving...' : 'Save Login Changes'}</button>
+          </div>
+        </form>
+      </div>
+    )}
+    {loginBusy && <ActionLoaderOverlay message={editingLogin ? 'Updating login...' : 'Creating login...'} />}
     </>
   );
 }
@@ -3542,6 +4159,8 @@ function MandalCardGrid({
           <div className="mandal-card-meta">
             <span>{Number(mandal.memberCount || 0)} members</span>
             <span>{mandal.contactPhone || 'Phone pending'}</span>
+            <span>{mandal.slipLimit ? `${mandal.slipLimit} slip limit` : 'Unlimited slips'}</span>
+            <span>{mandal.whatsappMode === 'MANUAL_SHARE' ? 'Manual WhatsApp' : 'Paid WhatsApp API'}</span>
             <em>Template Ready</em>
           </div>
           <div className="mandal-card-actions">
@@ -3631,6 +4250,7 @@ function PaymentStatusSelector({
 function MemberCollectorApp({
   activeForm,
   busy,
+  entryFields,
   mandal,
   modalOpen,
   notice,
@@ -3648,6 +4268,7 @@ function MemberCollectorApp({
 }: {
   activeForm: ActiveForm | null;
   busy: boolean;
+  entryFields: EntryFieldConfig[];
   mandal: DemoMandal | null;
   modalOpen: boolean;
   notice: string;
@@ -3783,7 +4404,7 @@ function MemberCollectorApp({
             {(busy || notice) && <div className={`notice ${busy ? 'busy' : ''}`}>{busy ? 'Working...' : notice}</div>}
 
             <section className="member-stats">
-              <Stat icon={<ReceiptText />} label="Total Entries" note="Your slips" value={String(slips.length)} />
+              <Stat icon={<ReceiptText />} label="Total Entries" note={mandal?.slipLimit ? `Mandal limit: ${mandal.slipLimit}` : 'Your slips'} value={String(slips.length)} />
               <Stat icon={<BadgeIndianRupee />} label="Collected" note={`${paidSlips} paid`} value={money(collected)} />
               <Stat icon={<CheckCircle2 />} label="Paid Slips" note="Generated receipts" value={String(paidSlips)} />
               <Stat icon={<FileText />} label="Pending Slips" note="No slip until paid" value={String(pendingSlipRows.length)} />
@@ -3840,7 +4461,7 @@ function MemberCollectorApp({
                         }}
                         type="button"
                       >
-                        <Share2 size={15} /> Share
+                        <WhatsAppIcon size={15} /> WhatsApp
                       </button>
                     </span>
                   </div>
@@ -3920,26 +4541,12 @@ function MemberCollectorApp({
                 <span>Fill contribution details and generate slip.</span>
               </div>
             </div>
-            <ContributorNameFields />
-            <label>Shop Name<input name="shopName" placeholder="Enter shop / business name" /></label>
-            <label>Amount (Rs.) *<input inputMode="numeric" name="amount" required placeholder="e.g. 1500" /></label>
-            <label>Location *<input name="areaName" required placeholder="e.g. Main Road, Pune" /></label>
-            <label>Address<textarea name="contributorAddress" placeholder="Full address (optional)" /></label>
-            <label>WhatsApp Number<input name="contributorPhone" placeholder="+91 10 digit WhatsApp number" /></label>
-            <PaymentStatusSelector value={entryStatus} onChange={setEntryStatus} />
+            <EntryCoreFields
+              entryFields={entryFields}
+              entryStatus={entryStatus}
+              onEntryStatusChange={setEntryStatus}
+            />
             {(activeForm?.customFields ?? []).map((field) => <CustomFieldInput field={field} key={field.id} />)}
-            <label>
-              Payment Mode *
-              <select name="paymentMode" defaultValue="CASH">
-                <option value="CASH">Cash</option>
-                <option value="UPI">Online / UPI</option>
-                <option value="CHEQUE">Cheque</option>
-                <option value="BANK_TRANSFER">Bank Transfer</option>
-              </select>
-            </label>
-            {entryStatus === 'PENDING' && (
-              <label className="pending-date-card">Tentative Payment Date<input name="tentativePaymentDate" type="date" /></label>
-            )}
             <div className="modal-actions">
               <button onClick={() => onModalChange(false)} type="button">Cancel</button>
               <button className={entryStatus === 'PENDING' ? 'pending-action' : 'success'} disabled={busy} onClick={(event) => { if (event.currentTarget.form?.checkValidity()) onPrepareWhatsApp(entryStatus); }} type="submit">{entryStatus === 'PENDING' ? <Clock size={18} /> : <CheckCircle2 size={18} />}{entryStatus === 'PENDING' ? 'Save as Pending' : 'Confirm & Generate Slip'}</button>
@@ -4071,6 +4678,41 @@ function LoginPanel({
 
   return (
     <main className="auth-page">
+      <section className="auth-showcase" aria-label="Samavet ePawati benefits">
+        <div className="auth-showcase-content">
+          <img className="auth-samavet-logo" src="/samavet-logo-transparent.png" alt="Samavet" />
+
+          <div className="auth-showcase-product">
+            <span aria-hidden="true"><ReceiptText size={30} /></span>
+            <div>
+              <h2>ePawati</h2>
+              <p>Digital receipts. Trusted records.</p>
+            </div>
+          </div>
+
+          <p className="auth-showcase-kicker">Go digital. Save paper.</p>
+          <p className="auth-showcase-copy">Create, manage and share donation receipts in seconds.</p>
+
+          <div className="auth-benefits">
+            <div>
+              <ReceiptText size={22} aria-hidden="true" />
+              <strong>Instant receipts</strong>
+              <span>Create records in real time.</span>
+            </div>
+            <div>
+              <Share2 size={22} aria-hidden="true" />
+              <strong>Easy sharing</strong>
+              <span>Share receipts with donors.</span>
+            </div>
+            <div>
+              <ShieldCheck size={22} aria-hidden="true" />
+              <strong>Secure records</strong>
+              <span>Keep every entry organized.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section className="auth-form-panel">
         <div className="auth-card">
           {isOwner && (
@@ -4086,26 +4728,42 @@ function LoginPanel({
           )}
 
           <form className="login-panel clean" key={loginType} onSubmit={onSubmit}>
-            <div className="panel-title">
-              <ShieldCheck size={24} />
+            <div className="auth-product-mark" aria-label="Samavet ePawati">
+              <span className="auth-product-icon" aria-hidden="true">
+                <ReceiptText size={22} />
+              </span>
               <div>
-                <strong>Admin Portal</strong>
-                <span>Authorized Access Only</span>
+                <strong>ePawati</strong>
+                <span>by Samavet</span>
               </div>
             </div>
+
+            <div className="auth-heading">
+              <span>{isOwner ? 'Super admin portal' : 'Secure account access'}</span>
+              <h1>Welcome back</h1>
+              <p>Sign in to manage your ePawati account.</p>
+            </div>
+
             <label>
-              Username or Email
+              Username
               <input
+                autoComplete="username"
                 name="identifier"
                 required
                 defaultValue={isOwner ? DEFAULT_OWNER_IDENTIFIER : ''}
-                placeholder={isOwner ? DEFAULT_OWNER_IDENTIFIER : 'Enter username or email'}
+                placeholder={isOwner ? DEFAULT_OWNER_IDENTIFIER : 'Enter your username'}
               />
             </label>
             <label>
               Password
               <span className="password-field">
-                <input name="password" required type={passwordVisible ? 'text' : 'password'} placeholder="Enter password" />
+                <input
+                  autoComplete="current-password"
+                  name="password"
+                  required
+                  type={passwordVisible ? 'text' : 'password'}
+                  placeholder="Enter your password"
+                />
                 <button
                   aria-label={passwordVisible ? 'Hide password' : 'Show password'}
                   onClick={() => setPasswordVisible((visible) => !visible)}
@@ -4117,8 +4775,13 @@ function LoginPanel({
             </label>
             <button className="primary" disabled={busy} type="submit">
               <ShieldCheck size={18} />
-              Access Dashboard
+              {busy ? 'Signing in...' : 'Sign in securely'}
             </button>
+
+            <p className="auth-security-note">
+              <ShieldCheck size={14} aria-hidden="true" />
+              Authorized users only
+            </p>
           </form>
 
           {shouldShowNotice && <div className={`notice ${busy ? 'busy' : ''}`}>{busy ? 'Working...' : notice}</div>}
@@ -4129,10 +4792,11 @@ function LoginPanel({
             </button>
           )}
         </div>
+
+        <a className="auth-powered" href="https://www.bracketdex.com/" rel="noreferrer" target="_blank">
+          Powered by BracketDex Technologies
+        </a>
       </section>
-      <a className="auth-powered" href="https://www.bracketdex.com/" rel="noreferrer" target="_blank">
-        Powered by BracketDex Technologies
-      </a>
     </main>
   );
 }
@@ -4176,6 +4840,7 @@ const RECEIPT_MARATHI_TEXT_FIELDS = new Set([
   'collectorName',
   'contributorAddress',
   'contributorName',
+  'contributorNameMr',
   'donorType',
   'paymentMode',
   'receipt_note',
@@ -4652,6 +5317,7 @@ function sampleFieldValue(key: string, label: string, placement?: Partial<Templa
     collectorName: 'Amit Collector',
     contributorAddress: 'Main Road, Pune',
     contributorName: 'Mahesh Traders',
+    contributorNameMr: 'महेश ट्रेडर्स',
     contributorPhone: '9876543210',
     createdAt: '26/07/2026',
     donorType: 'Shop',
@@ -4660,7 +5326,8 @@ function sampleFieldValue(key: string, label: string, placement?: Partial<Templa
     slipNumber: '003',
   };
   const raw = samples[key] ?? label;
-  return applyAutoMarathiTranslation(raw, placement);
+  const receiptPreview = receiptRenderText(key, raw, 5100);
+  return applyAutoMarathiTranslation(receiptPreview, placement);
 }
 
 function FontDialogModal({
@@ -4867,7 +5534,7 @@ function TemplateView({
   activeTemplate?: Template;
   language?: Language;
   latestTemplateVersion?: Template['versions'][number];
-  onAddField: (label: string, required?: boolean) => void;
+  onAddField: (label: string, required?: boolean) => CustomField | void | Promise<CustomField | void>;
   onPreviewChange: (url: string) => void;
   onPrompt: (options: ThemedPromptOptions) => Promise<string | null>;
   onSaveTemplate?: (placements: Record<string, TemplatePlacement>) => Promise<void> | void;
@@ -4879,14 +5546,18 @@ function TemplateView({
     | { fieldKey: string; handle: ResizeHandle; origin: TemplatePlacement; startX: number; startY: number; type: 'resize' };
 
   const [fieldLabel, setFieldLabel] = useState('');
+  const [optionalFieldLabel, setOptionalFieldLabel] = useState('');
   const canvasWidth = latestTemplateVersion?.canvasWidth ?? 1328;
   const canvasHeight = latestTemplateVersion?.canvasHeight ?? 800;
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const [canvasScale, setCanvasScale] = useState(1);
+  const [editorCustomFields, setEditorCustomFields] = useState<Array<{ key: string; label: string }>>([]);
   const fieldOptions = useMemo(
     () => [
       { key: 'slipNumber', label: 'Slip No.' },
       { key: 'createdAt', label: 'Date' },
       { key: 'contributorName', label: 'Name' },
+      { key: 'contributorNameMr', label: 'Name in Marathi' },
       { key: 'contributorAddress', label: 'Address' },
       { key: 'amount', label: 'Amount' },
       { key: 'amountWords', label: 'Amount in Words' },
@@ -4899,12 +5570,19 @@ function TemplateView({
       { key: 'donorType', label: 'Donor Type' },
       { key: 'building_name', label: 'Building / Lane' },
       ...(activeForm?.customFields ?? []).map((field) => ({ key: field.key, label: field.label })),
+      ...editorCustomFields,
     ],
-    [activeForm?.customFields],
+    [activeForm?.customFields, editorCustomFields],
   );
   const [activeField, setActiveField] = useState('slipNumber');
   const [interaction, setInteraction] = useState<FieldInteraction | null>(null);
   const [showGrid, setShowGrid] = useState(true);
+  const [snapToGrid, setSnapToGrid] = useState(true);
+  const [showRulers, setShowRulers] = useState(false);
+  const [zoomPercent, setZoomPercent] = useState(100);
+  const undoStackRef = useRef<Record<string, TemplatePlacement>[]>([]);
+  const redoStackRef = useRef<Record<string, TemplatePlacement>[]>([]);
+  const [historyVersion, setHistoryVersion] = useState(0);
   const [contextMenu, setContextMenu] = useState<{ fieldKey: string; x: number; y: number } | null>(null);
   const [fontModalFieldKey, setFontModalFieldKey] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState('');
@@ -4982,6 +5660,14 @@ function TemplateView({
     };
   });
   const selectedPlacement = placements[activeField] ?? defaultPlacement();
+  const canUndo = historyVersion >= 0 && undoStackRef.current.length > 0;
+  const canRedo = historyVersion >= 0 && redoStackRef.current.length > 0;
+  const selectedPercent = {
+    height: Number(((selectedPlacement.height / canvasHeight) * 100).toFixed(1)),
+    width: Number(((selectedPlacement.width / canvasWidth) * 100).toFixed(1)),
+    x: Number(((selectedPlacement.x / canvasWidth) * 100).toFixed(1)),
+    y: Number(((selectedPlacement.y / canvasHeight) * 100).toFixed(1)),
+  };
 
   const latestTemplateBackground = latestTemplateVersion?.backgroundFileUrl;
   const latestTemplateFields = latestTemplateVersion?.renderConfig?.fields;
@@ -4994,7 +5680,25 @@ function TemplateView({
     if (latestTemplateBackground) {
       onPreviewChange(resolveTemplateAssetUrl(latestTemplateBackground));
     }
-  }, [latestTemplateBackground, latestTemplateFields, latestTemplateVersion?.id, onPreviewChange]);
+  }, [latestTemplateBackground, latestTemplateFields, latestTemplateVersion?.id]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const updateCanvasScale = () => {
+      const renderedWidth = canvas.getBoundingClientRect().width;
+      if (renderedWidth > 0) {
+        setCanvasScale(Math.max(0.1, renderedWidth / canvasWidth));
+      }
+    };
+
+    const observer = new ResizeObserver(updateCanvasScale);
+    observer.observe(canvas);
+    updateCanvasScale();
+
+    return () => observer.disconnect();
+  }, [canvasWidth]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -5002,7 +5706,7 @@ function TemplateView({
       if (target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName)) return;
       if ((event.key === 'Delete' || event.key === 'Backspace') && placements[activeField]) {
         event.preventDefault();
-        removePlacement(activeField);
+        if (!placements[activeField]?.locked) removePlacement(activeField);
       }
       if (event.key === 'Escape') setContextMenu(null);
     }
@@ -5021,14 +5725,58 @@ function TemplateView({
   }
 
   function updatePlacement(fieldKey: string, partial: Partial<TemplatePlacement>) {
-    setPlacements((current) => ({
-      ...current,
-      [fieldKey]: {
-        ...defaultPlacement(),
-        ...current[fieldKey],
-        ...partial,
-      },
-    }));
+    setPlacements((current) => {
+      if (current[fieldKey]?.locked && !Object.prototype.hasOwnProperty.call(partial, 'locked')) return current;
+      undoStackRef.current = [...undoStackRef.current.slice(-59), clonePlacementMap(current)];
+      redoStackRef.current = [];
+      return {
+        ...current,
+        [fieldKey]: {
+          ...defaultPlacement(),
+          ...current[fieldKey],
+          ...partial,
+        },
+      };
+    });
+    setHistoryVersion((value) => value + 1);
+  }
+
+  function undoPlacementChange() {
+    const previous = undoStackRef.current.pop();
+    if (!previous) return;
+    setPlacements((current) => {
+      redoStackRef.current = [...redoStackRef.current.slice(-59), clonePlacementMap(current)];
+      return previous;
+    });
+    setHistoryVersion((value) => value + 1);
+  }
+
+  function redoPlacementChange() {
+    const next = redoStackRef.current.pop();
+    if (!next) return;
+    setPlacements((current) => {
+      undoStackRef.current = [...undoStackRef.current.slice(-59), clonePlacementMap(current)];
+      return next;
+    });
+    setHistoryVersion((value) => value + 1);
+  }
+
+  function nudgeActiveField(deltaX: number, deltaY: number) {
+    const placement = placements[activeField];
+    if (!placement || placement.locked) return;
+    updatePlacement(activeField, {
+      x: clamp(placement.x + deltaX, 0, canvasWidth - placement.width),
+      y: clamp(placement.y + deltaY, 0, canvasHeight - placement.height),
+    });
+  }
+
+  function updatePlacementPercent(property: 'height' | 'width' | 'x' | 'y', percent: number) {
+    const dimension = property === 'x' || property === 'width' ? canvasWidth : canvasHeight;
+    updatePlacement(activeField, { [property]: Math.round((clamp(percent, 0, 100) / 100) * dimension) });
+  }
+
+  function snapValue(value: number) {
+    return snapToGrid ? Math.round(value / 10) * 10 : Math.round(value);
   }
 
   function placeActiveField(event: PointerEvent<HTMLDivElement>) {
@@ -5038,9 +5786,10 @@ function TemplateView({
     setContextMenu(null);
     const point = pointFromClient(event.clientX, event.clientY);
     const placement = placements[activeField] ?? defaultPlacement();
+    if (placement.locked) return;
     updatePlacement(activeField, {
-      x: clamp(point.x, 0, canvasWidth - placement.width),
-      y: clamp(point.y, 0, canvasHeight - placement.height),
+      x: clamp(snapValue(point.x), 0, canvasWidth - placement.width),
+      y: clamp(snapValue(point.y), 0, canvasHeight - placement.height),
     });
   }
 
@@ -5053,8 +5802,8 @@ function TemplateView({
     const origin = interaction.origin;
     if (interaction.type === 'move') {
       updatePlacement(interaction.fieldKey, {
-        x: clamp(origin.x + deltaX, 0, canvasWidth - origin.width),
-        y: clamp(origin.y + deltaY, 0, canvasHeight - origin.height),
+        x: clamp(snapValue(origin.x + deltaX), 0, canvasWidth - origin.width),
+        y: clamp(snapValue(origin.y + deltaY), 0, canvasHeight - origin.height),
       });
       return;
     }
@@ -5077,11 +5826,13 @@ function TemplateView({
     nextHeight = clamp(nextHeight, 24, canvasHeight - nextY);
     nextX = clamp(nextX, 0, canvasWidth - nextWidth);
     nextY = clamp(nextY, 0, canvasHeight - nextHeight);
+    const snappedX = clamp(snapValue(nextX), 0, canvasWidth - 48);
+    const snappedY = clamp(snapValue(nextY), 0, canvasHeight - 24);
     updatePlacement(interaction.fieldKey, {
-      height: nextHeight,
-      width: nextWidth,
-      x: nextX,
-      y: nextY,
+      height: clamp(snapValue(nextHeight), 24, canvasHeight - snappedY),
+      width: clamp(snapValue(nextWidth), 48, canvasWidth - snappedX),
+      x: snappedX,
+      y: snappedY,
     });
   }
 
@@ -5092,6 +5843,7 @@ function TemplateView({
     const point = pointFromClient(event.clientX, event.clientY);
     setActiveField(fieldKey);
     setContextMenu(null);
+    if (placements[fieldKey]?.locked) return;
     setInteraction({
       fieldKey,
       origin: placements[fieldKey] ?? defaultPlacement(),
@@ -5108,6 +5860,7 @@ function TemplateView({
     const point = pointFromClient(event.clientX, event.clientY);
     setActiveField(fieldKey);
     setContextMenu(null);
+    if (placements[fieldKey]?.locked) return;
     setInteraction({
       fieldKey,
       handle,
@@ -5119,11 +5872,15 @@ function TemplateView({
   }
 
   function removePlacement(fieldKey = activeField) {
+    if (placements[fieldKey]?.locked) return;
     setPlacements((current) => {
+      undoStackRef.current = [...undoStackRef.current.slice(-59), clonePlacementMap(current)];
+      redoStackRef.current = [];
       const next = { ...current };
       delete next[fieldKey];
       return next;
     });
+    setHistoryVersion((value) => value + 1);
     setContextMenu(null);
   }
 
@@ -5131,14 +5888,20 @@ function TemplateView({
     const source = placements[fieldKey];
     if (!source) return;
     const duplicateKey = `${baseTemplateFieldKey(fieldKey)}_copy_${Date.now()}`;
-    setPlacements((current) => ({
-      ...current,
-      [duplicateKey]: {
-        ...source,
-        x: source.x + 24,
-        y: source.y + 24,
-      },
-    }));
+    setPlacements((current) => {
+      undoStackRef.current = [...undoStackRef.current.slice(-59), clonePlacementMap(current)];
+      redoStackRef.current = [];
+      return {
+        ...current,
+        [duplicateKey]: {
+          ...source,
+          locked: false,
+          x: source.x + 24,
+          y: source.y + 24,
+        },
+      };
+    });
+    setHistoryVersion((value) => value + 1);
     setActiveField(duplicateKey);
     setContextMenu(null);
   }
@@ -5217,6 +5980,29 @@ function TemplateView({
     actions[action]?.();
   }
 
+  async function handleAddEditorField(label: string, required: boolean) {
+    const trimmedLabel = label.trim();
+    if (!trimmedLabel) {
+      setSaveMessage('Enter a field name first');
+      return;
+    }
+    try {
+      const created = await onAddField(trimmedLabel, required);
+      if (!created?.key) throw new Error('Field could not be created.');
+      if (!activeForm) {
+        setEditorCustomFields((current) => current.some((field) => field.key === created.key)
+          ? current
+          : [...current, { key: created.key, label: created.label }]);
+      }
+      addTemplateField(created.key);
+      setActiveField(created.key);
+      setSaveMessage(`${required ? 'Compulsory' : 'Optional'} field added`);
+    } catch (error) {
+      setSaveMessage(error instanceof Error ? error.message : 'Could not add field');
+    }
+    window.setTimeout(() => setSaveMessage(''), 2600);
+  }
+
   async function handleSaveTemplate() {
     setSaveMessage('Saving...');
     try {
@@ -5266,7 +6052,34 @@ function TemplateView({
           <button onClick={handleSaveTemplate} type="button"><CheckCircle2 size={18} />{t(language, 'Save Template')}</button>
           {saveMessage && <span className="template-save-toast"><CheckCircle2 size={16} />{t(language, saveMessage)}</span>}
         </div>
-        <div className="template-canvas">
+        <div className="canvas-editor-toolbar">
+          <div className="editor-tool-group">
+            <button disabled={!canUndo} onClick={undoPlacementChange} title="Undo" type="button"><Undo2 size={17} /></button>
+            <button disabled={!canRedo} onClick={redoPlacementChange} title="Redo" type="button"><Redo2 size={17} /></button>
+          </div>
+          <div className="editor-tool-group zoom-controls">
+            <button disabled={zoomPercent <= 50} onClick={() => setZoomPercent((value) => Math.max(50, value - 25))} title="Zoom out" type="button"><ZoomOut size={17} /></button>
+            <strong>{zoomPercent}%</strong>
+            <button disabled={zoomPercent >= 250} onClick={() => setZoomPercent((value) => Math.min(250, value + 25))} title="Zoom in" type="button"><ZoomIn size={17} /></button>
+            <button onClick={() => setZoomPercent(100)} type="button">FIT</button>
+          </div>
+          <div className="editor-tool-group">
+            <button className={showGrid ? 'active' : ''} onClick={() => setShowGrid((value) => !value)} type="button"><Grid3X3 size={17} />Grid</button>
+            <button className={snapToGrid ? 'active' : ''} onClick={() => setSnapToGrid((value) => !value)} type="button"><Magnet size={17} />Snap</button>
+            <button className={showRulers ? 'active' : ''} onClick={() => setShowRulers((value) => !value)} type="button"><Ruler size={17} />Rulers</button>
+            <button
+              className={selectedPlacement.locked ? 'active locked' : ''}
+              disabled={!placements[activeField]}
+              onClick={() => updatePlacement(activeField, { locked: !selectedPlacement.locked })}
+              type="button"
+            >
+              {selectedPlacement.locked ? <LockKeyhole size={17} /> : <Unlock size={17} />}
+              {selectedPlacement.locked ? 'Locked' : 'Lock'}
+            </button>
+          </div>
+          <span className="editor-coordinate-readout">X {selectedPercent.x}% · Y {selectedPercent.y}% · W {selectedPercent.width}% · H {selectedPercent.height}%</span>
+        </div>
+        <div className={`template-canvas ${showRulers ? 'with-rulers' : ''}`}>
           <div
             className={`template-map-canvas ${showGrid ? 'show-grid' : ''}`}
             ref={canvasRef}
@@ -5278,20 +6091,24 @@ function TemplateView({
               event.preventDefault();
               setContextMenu(null);
             }}
-            style={{ aspectRatio: `${canvasWidth} / ${canvasHeight}` }}
+            style={{
+              aspectRatio: `${canvasWidth} / ${canvasHeight}`,
+              maxWidth: zoomPercent > 100 ? 'none' : '100%',
+              width: `${zoomPercent}%`,
+            }}
           >
             <img alt="Vargani slip template" src={templatePreview} />
             {Object.entries(placements).map(([key, placement]) => {
               const baseKey = baseTemplateFieldKey(key);
               const field = fieldOptions.find((item) => item.key === baseKey);
-              const sampleValue = sampleFieldValue(baseKey, field?.label ?? baseKey);
+              const sampleValue = sampleFieldValue(baseKey, field?.label ?? baseKey, placement);
               const fontSize =
                 placement.textWrap === 'shrink' && sampleValue.length > 18
                   ? Math.max(10, placement.fontSize - Math.ceil((sampleValue.length - 18) / 3))
                   : placement.fontSize;
               return (
                 <div
-                  className={`field-anchor ${activeField === key ? 'active' : ''}`}
+                  className={`field-anchor ${activeField === key ? 'active' : ''} ${placement.locked ? 'locked' : ''}`}
                   key={key}
                   onContextMenu={(event) => {
                     event.preventDefault();
@@ -5305,18 +6122,18 @@ function TemplateView({
                     alignItems: placement.textWrap === 'single' ? 'center' : 'flex-start',
                     backgroundColor: placement.backgroundColor,
                     borderColor: placement.borderColor,
-                    borderRadius: `${placement.borderRadius}px`,
+                    borderRadius: `${placement.borderRadius * canvasScale}px`,
                     color: placement.color,
                     fontFamily: placement.fontFamily,
-                    fontSize: `${fontSize}px`,
+                    fontSize: `${fontSize * canvasScale}px`,
                     fontStyle: placement.fontStyle,
                     fontWeight: placement.fontWeight,
                     height: `${(placement.height / canvasHeight) * 100}%`,
                     left: `${(placement.x / canvasWidth) * 100}%`,
-                    letterSpacing: `${placement.letterSpacing}px`,
+                    letterSpacing: `${placement.letterSpacing * canvasScale}px`,
                     lineHeight: placement.lineHeight,
                     opacity: placement.opacity,
-                    padding: `${placement.padding}px`,
+                    padding: `${placement.padding * canvasScale}px`,
                     textDecoration: placement.textDecoration,
                     textAlign: placement.textAlign,
                     textShadow: placement.shadow ? '0 2px 4px rgba(0, 0, 0, 0.35)' : 'none',
@@ -5330,7 +6147,7 @@ function TemplateView({
                   tabIndex={0}
                 >
                   <span>{sampleValue}</span>
-                  {activeField === key && (
+                  {activeField === key && !placement.locked && (
                     <>
                       {(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as ResizeHandle[]).map((handle) => (
                         <span
@@ -5544,6 +6361,7 @@ function TemplateView({
             <span>{t(language, 'Place boxes exactly on printed slip labels.')}</span>
           </div>
         </div>
+        <strong className="quick-add-title">Quick Add Receipt Fields</strong>
         <div className="field-pills">
           {fieldOptions.map((field) => (
             <button
@@ -5559,18 +6377,29 @@ function TemplateView({
           ))}
         </div>
         <div className="template-settings">
-          <strong>{t(language, 'Selected Field')}</strong>
+          <div className="selected-field-heading">
+            <strong>{t(language, 'Selected Field')}: {templateFieldLabel(activeField, fieldOptions, placements)}</strong>
+            <span className={selectedPlacement.locked ? 'locked' : ''}>{selectedPlacement.locked ? 'Locked' : 'Editable'}</span>
+          </div>
+          <div className="field-nudge-controls" aria-label="Nudge selected field">
+            <button disabled={selectedPlacement.locked} onClick={() => nudgeActiveField(0, -1)} title="Move up" type="button">↑</button>
+            <button disabled={selectedPlacement.locked} onClick={() => nudgeActiveField(-1, 0)} title="Move left" type="button">←</button>
+            <button disabled={selectedPlacement.locked} onClick={() => nudgeActiveField(1, 0)} title="Move right" type="button">→</button>
+            <button disabled={selectedPlacement.locked} onClick={() => nudgeActiveField(0, 1)} title="Move down" type="button">↓</button>
+            <button onClick={() => duplicatePlacement(activeField)} type="button">Duplicate</button>
+          </div>
           <div className="mini-grid">
             <label>X<input type="number" value={selectedPlacement.x} onChange={(event) => updatePlacement(activeField, { x: Number(event.target.value) })} /></label>
             <label>Y<input type="number" value={selectedPlacement.y} onChange={(event) => updatePlacement(activeField, { y: Number(event.target.value) })} /></label>
             <label>Width<input type="number" value={selectedPlacement.width} onChange={(event) => updatePlacement(activeField, { width: Number(event.target.value) })} /></label>
             <label>Height<input type="number" value={selectedPlacement.height} onChange={(event) => updatePlacement(activeField, { height: Number(event.target.value) })} /></label>
           </div>
+          <label className="range-setting">Font Size: {selectedPlacement.fontSize}px<input disabled={selectedPlacement.locked} max="96" min="8" type="range" value={selectedPlacement.fontSize} onChange={(event) => updatePlacement(activeField, { fontSize: Number(event.target.value) })} /></label>
           <div className="mini-grid">
             <label>Font Size<input type="number" value={selectedPlacement.fontSize} onChange={(event) => updatePlacement(activeField, { fontSize: Number(event.target.value) })} /></label>
             <label>Align<select value={selectedPlacement.textAlign} onChange={(event) => updatePlacement(activeField, { textAlign: event.target.value as TextAlign })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
           </div>
-          <label>Font Family<select value={selectedPlacement.fontFamily} onChange={(event) => updatePlacement(activeField, { fontFamily: event.target.value })}><option value="Arial, sans-serif">Arial</option><option value='"Noto Sans Devanagari", Arial, sans-serif'>Noto Sans Devanagari</option><option value="Inter, Arial, sans-serif">Inter</option><option value="Georgia, serif">Serif</option><option value='"Arial Narrow", Arial, sans-serif'>Arial Narrow</option></select></label>
+          <label>Font Family<select value={selectedPlacement.fontFamily} onChange={(event) => updatePlacement(activeField, { fontFamily: event.target.value })}><option value="Arial, sans-serif">Arial</option><option value='"Noto Sans Devanagari", Arial, sans-serif'>Noto Sans Devanagari</option><option value="Inter, Arial, sans-serif">Inter</option><option value="Georgia, serif">Georgia</option><option value='"Arial Narrow", Arial, sans-serif'>Arial Narrow</option><option value='"Trebuchet MS", Arial, sans-serif'>Trebuchet</option><option value='"Courier New", monospace'>Courier New</option></select></label>
           <div className="mini-grid">
             <label>Weight<select value={selectedPlacement.fontWeight} onChange={(event) => updatePlacement(activeField, { fontWeight: Number(event.target.value) })}><option value={400}>Regular</option><option value={700}>Bold</option><option value={800}>Extra Bold</option><option value={900}>Black</option></select></label>
             <label>Wrap<select value={selectedPlacement.textWrap} onChange={(event) => updatePlacement(activeField, { textWrap: event.target.value as TextWrapMode })}><option value="single">Single line</option><option value="wrap">Word wrap</option><option value="shrink">Auto reduce</option></select></label>
@@ -5581,9 +6410,39 @@ function TemplateView({
             <button className={selectedPlacement.textDecoration === 'underline' ? 'active' : ''} onClick={() => contextAction(activeField, 'underline')} type="button">U</button>
             <button className={selectedPlacement.shadow ? 'active' : ''} onClick={() => contextAction(activeField, 'shadow')} type="button">Shadow</button>
           </div>
+          <div className="color-preset-row" aria-label="Font color presets">
+            {['#111111', '#ffffff', '#64748b', '#dc2626', '#f97316', '#16a34a', '#0284c7', '#2563eb', '#7c3aed', '#db2777'].map((color) => (
+              <button aria-label={`Use ${color}`} className={selectedPlacement.color === color ? 'active' : ''} key={color} onClick={() => updatePlacement(activeField, { color })} style={{ backgroundColor: color }} type="button" />
+            ))}
+          </div>
           <div className="mini-grid">
             <label>Text Color<input type="color" value={selectedPlacement.color} onChange={(event) => updatePlacement(activeField, { color: event.target.value })} /></label>
             <label>Background<input type="color" value={toColorInput(selectedPlacement.backgroundColor)} onChange={(event) => updatePlacement(activeField, { backgroundColor: event.target.value })} /></label>
+          </div>
+          <div className="property-button-grid four">
+            <button className={selectedPlacement.textWrap === 'single' ? 'active' : ''} onClick={() => updatePlacement(activeField, { textWrap: 'single' })} type="button">No Wrap</button>
+            <button className={selectedPlacement.textWrap === 'wrap' ? 'active' : ''} onClick={() => updatePlacement(activeField, { textWrap: 'wrap' })} type="button">Multi-line</button>
+            <button className={selectedPlacement.textWrap === 'shrink' ? 'active' : ''} onClick={() => updatePlacement(activeField, { textWrap: 'shrink' })} type="button">Auto-fit</button>
+            <button onClick={() => updatePlacement(activeField, { textAlign: 'center', textWrap: 'wrap' })} type="button">Centered</button>
+          </div>
+          <div className="property-button-grid four">
+            <button className={selectedPlacement.textTransform === 'none' ? 'active' : ''} onClick={() => updatePlacement(activeField, { textTransform: 'none' })} type="button">Aa</button>
+            <button className={selectedPlacement.textTransform === 'uppercase' ? 'active' : ''} onClick={() => updatePlacement(activeField, { textTransform: 'uppercase' })} type="button">AA</button>
+            <button onClick={() => updatePlacement(activeField, { textTransform: 'none' })} type="button">aa</button>
+            <button className={selectedPlacement.textTransform === 'capitalize' ? 'active' : ''} onClick={() => updatePlacement(activeField, { textTransform: 'capitalize' })} type="button">Aa+</button>
+          </div>
+          <div className="range-pair">
+            <label>Letter Spacing: {selectedPlacement.letterSpacing}px<input disabled={selectedPlacement.locked} max="20" min="-2" type="range" value={selectedPlacement.letterSpacing} onChange={(event) => updatePlacement(activeField, { letterSpacing: Number(event.target.value) })} /></label>
+            <label>Line Height: {selectedPlacement.lineHeight}<input disabled={selectedPlacement.locked} max="2.5" min="0.8" step="0.05" type="range" value={selectedPlacement.lineHeight} onChange={(event) => updatePlacement(activeField, { lineHeight: Number(event.target.value) })} /></label>
+          </div>
+          <strong className="position-size-title">Position &amp; Size (%)</strong>
+          <div className="percent-control-grid">
+            {(['x', 'y', 'width', 'height'] as const).map((property) => (
+              <label key={property}>{property === 'width' ? 'W' : property === 'height' ? 'H' : property.toUpperCase()}
+                <input disabled={selectedPlacement.locked} max="100" min="0" step="0.1" type="number" value={selectedPercent[property]} onChange={(event) => updatePlacementPercent(property, Number(event.target.value))} />
+                <input disabled={selectedPlacement.locked} max="100" min="0" step="0.1" type="range" value={selectedPercent[property]} onChange={(event) => updatePlacementPercent(property, Number(event.target.value))} />
+              </label>
+            ))}
           </div>
           <div className="mini-grid">
             <label>Border Color<input type="color" value={toColorInput(selectedPlacement.borderColor)} onChange={(event) => updatePlacement(activeField, { borderColor: event.target.value })} /></label>
@@ -5596,11 +6455,11 @@ function TemplateView({
             <label>Padding<input type="number" value={selectedPlacement.padding} onChange={(event) => updatePlacement(activeField, { padding: Number(event.target.value) })} /></label>
           </div>
           <div className="template-action-row wide">
-            <button disabled={!placements[activeField]} onClick={() => centerFieldOnSlip(activeField)} type="button">Center Field on Slip</button>
-            <button disabled={!placements[activeField]} onClick={() => fullWidthCenterField(activeField)} type="button">Full Width + Center Text</button>
+            <button disabled={!placements[activeField] || selectedPlacement.locked} onClick={() => centerFieldOnSlip(activeField)} type="button">Center Field on Slip</button>
+            <button disabled={!placements[activeField] || selectedPlacement.locked} onClick={() => fullWidthCenterField(activeField)} type="button">Full Width + Center Text</button>
           </div>
           <div className="template-action-row">
-            <button disabled={!placements[activeField]} onClick={() => removePlacement(activeField)} type="button">Delete Field</button>
+            <button disabled={!placements[activeField] || selectedPlacement.locked} onClick={() => removePlacement(activeField)} type="button">Delete Field</button>
             <button disabled={!placements[activeField]} onClick={() => duplicatePlacement(activeField)} type="button">Duplicate</button>
           </div>
         </div>
@@ -5610,15 +6469,23 @@ function TemplateView({
             return (
               <div className={activeField === key ? 'layer-row active' : 'layer-row'} key={key}>
                 <button onClick={() => setActiveField(key)} type="button">{templateFieldLabel(key, fieldOptions, placements)}</button>
-                <button onClick={() => removePlacement(key)} type="button">Delete</button>
+                <button disabled={placements[key]?.locked} onClick={() => removePlacement(key)} type="button">{placements[key]?.locked ? 'Locked' : 'Delete'}</button>
               </div>
             );
           })}
         </div>
         <div className="add-field">
-          <strong>Add Custom Field</strong>
+          <strong>Add Compulsory Custom Field</strong>
           <input value={fieldLabel} onChange={(event) => setFieldLabel(event.target.value)} placeholder="e.g. Building / Lane" />
-          <button onClick={() => { void onAddField(fieldLabel, true); setFieldLabel(''); }} type="button">
+          <button onClick={() => { void handleAddEditorField(fieldLabel, true); setFieldLabel(''); }} type="button">
+            <Plus size={18} />Add
+          </button>
+        </div>
+        <div className="add-field optional-field">
+          <strong>Add Optional Custom Field</strong>
+          <span>Use this for information that may be left blank on a receipt.</span>
+          <input value={optionalFieldLabel} onChange={(event) => setOptionalFieldLabel(event.target.value)} placeholder="e.g. Sponsor Category" />
+          <button onClick={() => { void handleAddEditorField(optionalFieldLabel, false); setOptionalFieldLabel(''); }} type="button">
             <Plus size={18} />Add
           </button>
         </div>
@@ -5660,6 +6527,7 @@ function defaultPlacement(): TemplatePlacement {
     height: 48,
     letterSpacing: 0,
     lineHeight: 1.15,
+    locked: false,
     opacity: 1,
     padding: 5,
     rotate: 0,
@@ -5810,6 +6678,12 @@ function normalizeTemplatePlacements(
   );
 }
 
+function clonePlacementMap(placements: Record<string, TemplatePlacement>) {
+  return Object.fromEntries(
+    Object.entries(placements).map(([key, placement]) => [key, { ...placement }]),
+  );
+}
+
 function findActiveTemplateVersion(templates: Template[] = []) {
   return templates
     .flatMap((template) => template.versions)
@@ -5844,8 +6718,10 @@ function whatsappStatusMessage(slip: Slip, result: WhatsAppSendResult | null | u
 }
 
 function normalizeIndianPhone(phone?: string | null) {
-  const digits = String(phone ?? '').replace(/\D/g, '');
+  let digits = String(phone ?? '').replace(/\D/g, '');
   if (!digits) return '';
+  if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1);
+  if (digits.length === 13 && digits.startsWith('091')) digits = digits.slice(1);
   if (digits.length === 10) return `91${digits}`;
   if (digits.length === 12 && digits.startsWith('91')) return digits;
   return digits;
@@ -5853,6 +6729,28 @@ function normalizeIndianPhone(phone?: string | null) {
 
 function workspaceQueryKey(session: AuthSession) {
   return ['workspace-bootstrap', session.user.role, session.user.mandalId ?? 'owner', session.user.id];
+}
+
+function workspaceCacheKey(session: AuthSession) {
+  return `${WORKSPACE_CACHE_PREFIX}:${session.user.id}`;
+}
+
+function readWorkspaceCache(session: AuthSession): WorkspaceBootstrap | null {
+  try {
+    const stored = window.localStorage.getItem(workspaceCacheKey(session));
+    return stored ? JSON.parse(stored) as WorkspaceBootstrap : null;
+  } catch {
+    return null;
+  }
+
+}
+
+function writeWorkspaceCache(session: AuthSession, workspace: WorkspaceBootstrap) {
+  try {
+    window.localStorage.setItem(workspaceCacheKey(session), JSON.stringify(workspace));
+  } catch {
+    // Storage can be unavailable or full; live data still remains usable in memory.
+  }
 }
 
 function mapBackendMandal(
@@ -5872,6 +6770,7 @@ function mapBackendMandal(
     adminPassword: mandal.adminPassword,
     city: mandal.city ?? '',
     contactEmail: mandal.contactEmail ?? '',
+    contactName: mandal.contactName ?? '',
     contactPhone: mandal.contactPhone ?? '',
     festivals: mandal.festivals ?? [],
     id: mandal.id,
@@ -5880,9 +6779,14 @@ function mapBackendMandal(
     locality: mandal.locality ?? '',
     memberCount: String(mandal._count?.members ?? mandal.memberCount ?? 0),
     name: mandal.name,
+    nameMr: mandal.nameMr ?? '',
+    plan: mandal.plan ?? 'starter',
     slug: mandal.slug,
+    slipLimit: mandal.slipLimit ?? null,
+    state: mandal.state ?? '',
     status: mandal.status,
     users: (mandal.users ?? []).filter((user) => user.status === 'ACTIVE'),
+    whatsappMode: mandal.whatsappMode ?? 'AUTO_API',
   };
 }
 
