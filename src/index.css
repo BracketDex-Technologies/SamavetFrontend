@@ -8672,3 +8672,259 @@ nav button.active svg,
     flex: 0 0 auto;
   }
 }
+
+/* Final mobile QA pass for template and form-management workspaces. */
+@media (max-width: 760px) {
+  .template-grid,
+  .owner-detail-card .template-grid {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 16px !important;
+    max-width: 100% !important;
+    overflow: visible !important;
+    width: 100% !important;
+  }
+
+  .template-stage,
+  .owner-detail-card .template-stage,
+  .settings-panel,
+  .owner-detail-card .settings-panel {
+    max-width: 100% !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+    padding: 16px !important;
+    width: 100% !important;
+  }
+
+  .template-stage {
+    max-height: none !important;
+    position: static !important;
+    top: auto !important;
+  }
+
+  .template-stage .panel-title {
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .template-stage .toolbar {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+    width: 100% !important;
+  }
+
+  .template-stage .toolbar .upload-button {
+    grid-column: 1 / -1 !important;
+  }
+
+  .template-stage .toolbar button,
+  .template-stage .toolbar .upload-button {
+    justify-content: center !important;
+    min-width: 0 !important;
+    white-space: normal !important;
+    width: 100% !important;
+  }
+
+  .canvas-editor-toolbar {
+    border-radius: 18px !important;
+    gap: 10px !important;
+    overflow: visible !important;
+  }
+
+  .canvas-tool-row {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    width: 100% !important;
+  }
+
+  .canvas-tool-row button,
+  .zoom-readout {
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+
+  .canvas-coordinates {
+    white-space: normal !important;
+    word-break: break-word !important;
+  }
+
+  .template-stage .template-canvas {
+    max-height: none !important;
+    min-height: 0 !important;
+    overflow: auto !important;
+    padding: 10px !important;
+    width: 100% !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .template-stage .template-map-canvas {
+    margin-inline: auto !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .template-stage .template-map-canvas img {
+    display: block !important;
+    height: 100% !important;
+    object-fit: contain !important;
+    width: 100% !important;
+  }
+
+  .settings-panel {
+    display: grid !important;
+    gap: 14px !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  .settings-panel .template-settings,
+  .settings-panel .add-field,
+  .settings-panel .panel-title {
+    max-width: 100% !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+    width: 100% !important;
+  }
+
+  .settings-panel .mini-grid,
+  .property-button-grid.four,
+  .template-action-row,
+  .template-action-row.wide {
+    grid-template-columns: 1fr !important;
+  }
+
+  .field-pills {
+    align-items: stretch !important;
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+  }
+
+  .field-pills button {
+    max-width: 100% !important;
+    min-height: 42px !important;
+    min-width: 0 !important;
+    overflow-wrap: anywhere !important;
+    white-space: normal !important;
+  }
+
+  .layers-panel {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  .layer-row {
+    grid-template-columns: minmax(0, 1fr) auto !important;
+  }
+
+  .layer-row span,
+  .layer-row button {
+    min-width: 0 !important;
+    overflow-wrap: anywhere !important;
+    white-space: normal !important;
+  }
+
+  .form-management-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 16px !important;
+  }
+
+  .form-management-card {
+    max-width: 100% !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+    padding: 18px !important;
+    width: 100% !important;
+  }
+
+  .question-form-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .form-switches label {
+    grid-template-columns: auto minmax(0, 1fr) !important;
+  }
+
+  .managed-fields-table {
+    display: grid !important;
+    gap: 12px !important;
+    overflow: visible !important;
+  }
+
+  .managed-fields-head.question-fields-head {
+    display: none !important;
+  }
+
+  .managed-fields-row.question-display-row {
+    align-items: stretch !important;
+    background: #fff !important;
+    border: 1px solid var(--line) !important;
+    border-radius: 16px !important;
+    display: grid !important;
+    gap: 10px !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    overflow: visible !important;
+    padding: 14px !important;
+  }
+
+  .managed-fields-row.question-display-row > span,
+  .managed-fields-row.question-display-row > strong {
+    max-width: 100% !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+    overflow-wrap: anywhere !important;
+    text-overflow: clip !important;
+    white-space: normal !important;
+  }
+
+  .managed-question-label {
+    font-size: 18px !important;
+    line-height: 1.22 !important;
+  }
+
+  .managed-field-actions {
+    display: grid !important;
+    gap: 8px !important;
+    grid-template-columns: 1fr !important;
+    width: 100% !important;
+  }
+
+  .managed-field-actions button {
+    height: auto !important;
+    justify-content: center !important;
+    line-height: 1.15 !important;
+    min-height: 44px !important;
+    min-width: 0 !important;
+    overflow-wrap: anywhere !important;
+    padding: 10px 12px !important;
+    white-space: normal !important;
+    width: 100% !important;
+  }
+}
+
+@media (min-width: 481px) and (max-width: 760px) {
+  .managed-field-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 420px) {
+  .template-stage,
+  .owner-detail-card .template-stage {
+    max-height: none !important;
+  }
+
+  .template-stage .template-canvas {
+    max-height: none !important;
+    min-height: 0 !important;
+  }
+
+  .canvas-tool-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  .template-stage .toolbar {
+    grid-template-columns: 1fr !important;
+  }
+}
