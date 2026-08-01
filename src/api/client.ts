@@ -10,9 +10,23 @@ const SESSION_EXPIRED_EVENT = 'digital-vargani-session-expired';
 const REQUEST_TIMEOUT_MS = 30_000;
 let refreshInFlight: Promise<boolean> | null = null;
 
+export interface ApiRequestOptions extends RequestInit {
+  timeoutMs?: number;
+}
+
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 export async function apiRequest<T>(
   path: string,
-  options: RequestInit = {},
+  options: ApiRequestOptions = {},
   session?: ApiAuthSession | null,
 ): Promise<T> {
   const response = await fetchWithAuth(path, options, session);
@@ -24,7 +38,7 @@ export async function apiRequest<T>(
     if (refreshed) {
       const retryResponse = await fetchWithAuth(path, options, session);
       if (!retryResponse.ok) {
-        throw new Error(readErrorMessage(await retryResponse.text(), retryResponse.status));
+        throw new ApiError(readErrorMessage(await retryResponse.text(), retryResponse.status), retryResponse.status);
       }
 
       return readResponse<T>(retryResponse);
@@ -32,15 +46,15 @@ export async function apiRequest<T>(
   }
 
   if (!response.ok) {
-    throw new Error(readErrorMessage(await response.text(), response.status));
+    throw new ApiError(readErrorMessage(await response.text(), response.status), response.status);
   }
 
   return readResponse<T>(response);
 }
 
-async function fetchWithAuth(path: string, options: RequestInit, session?: ApiAuthSession | null) {
+async function fetchWithAuth(path: string, options: ApiRequestOptions, session?: ApiAuthSession | null) {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs ?? REQUEST_TIMEOUT_MS);
   const abortFromCaller = () => controller.abort();
   options.signal?.addEventListener('abort', abortFromCaller, { once: true });
   const headers = new Headers(options.headers);
@@ -49,14 +63,18 @@ async function fetchWithAuth(path: string, options: RequestInit, session?: ApiAu
   if (session?.accessToken) headers.set('Authorization', `Bearer ${session.accessToken}`);
 
   try {
+    const { timeoutMs: _timeoutMs, ...requestOptions } = options;
     return await fetch(`${API_BASE_URL}${path}`, {
-      ...options,
+      ...requestOptions,
       headers,
       signal: controller.signal,
     });
   } catch (error) {
     if (controller.signal.aborted && !options.signal?.aborted) {
       throw new Error('The server took too long to respond. Please try again.');
+    }
+    if (error instanceof TypeError) {
+      throw new Error('Could not reach the server. Check your connection and try again.');
     }
     throw error;
   } finally {
