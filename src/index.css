@@ -9704,10 +9704,20 @@ html:lang(hi) #root {
   .adhyaksh-shell .vargani-page-actions,
   .adhyaksh-shell .action-card > button,
   .collector-shell .member-hero > button {
+    width: 100% !important;
+  }
+
+  .adhyaksh-shell .vargani-page-actions {
     display: grid !important;
     gap: 8px !important;
     grid-template-columns: minmax(0, 1fr) !important;
-    width: 100% !important;
+  }
+
+  .adhyaksh-shell .action-card > button,
+  .collector-shell .member-hero > button {
+    align-items: center !important;
+    display: inline-flex !important;
+    gap: 8px !important;
   }
 
   .adhyaksh-shell .vargani-page-actions button,
@@ -9718,6 +9728,11 @@ html:lang(hi) #root {
     min-width: 0 !important;
     padding-inline: 12px !important;
     width: 100% !important;
+  }
+
+  .adhyaksh-shell .action-card > button svg,
+  .collector-shell .member-hero > button svg {
+    flex: 0 0 auto;
   }
 
   .adhyaksh-shell .metric-strip,
