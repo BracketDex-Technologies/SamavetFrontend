@@ -44,7 +44,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, PointerEvent, ReactNode } from 'react';
-import { apiRequest } from './api/client';
+import { ApiError, apiDownload, apiRequest } from './api/client';
 
 type PaymentMode = 'CASH' | 'UPI' | 'CHEQUE' | 'BANK_TRANSFER' | 'OTHER';
 type TextAlign = 'left' | 'center' | 'right';
@@ -559,6 +559,7 @@ export default function App() {
   const [notice, setNotice] = useState('Login with main mandal admin to open the console.');
   const [authReady, setAuthReady] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [loginBusy, setLoginBusy] = useState(false);
   const [busyMessage, setBusyMessage] = useState('');
   const [workspaceRefreshing, setWorkspaceRefreshing] = useState(false);
   const [workspaceLoaded, setWorkspaceLoaded] = useState(false);
@@ -625,10 +626,6 @@ export default function App() {
     });
   }
 
-  const filteredSlips = slips.filter((slip) => {
-    const haystack = `${slip.slipNumber} ${slip.contributorName} ${slip.shopName ?? ''} ${slip.areaName ?? ''}`;
-    return haystack.toLowerCase().includes(query.toLowerCase());
-  });
   const activeTemplate = templates.find((template) =>
     template.versions.some((version) => version.isActive),
   );
@@ -992,9 +989,20 @@ export default function App() {
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const identifier = String(form.get('identifier') || '');
+    const identifier = String(form.get('identifier') || '').trim();
     const password = String(form.get('password') || '');
-    startBusy('Logging in...');
+
+    if (!identifier) {
+      setNotice('Enter your username.');
+      return;
+    }
+    if (password.length < 8) {
+      setNotice('Password must contain at least 8 characters.');
+      return;
+    }
+
+    setNotice('');
+    setLoginBusy(true);
     try {
       const nextSession = await apiRequest<AuthSession>('/auth/login', {
         body: JSON.stringify({
@@ -1002,16 +1010,25 @@ export default function App() {
           password,
         }),
         method: 'POST',
+        timeoutMs: 12_000,
       });
       window.localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession));
       setSession(nextSession);
       setWorkspaceLoaded(false);
       setNotice('');
-      await loadWorkspace(nextSession);
+      void loadWorkspace(nextSession);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Login failed.');
+      if (error instanceof ApiError && error.status === 401) {
+        setNotice('Incorrect username or password.');
+      } else if (error instanceof ApiError && error.status === 429) {
+        setNotice('Too many login attempts. Please wait a minute and try again.');
+      } else if (error instanceof ApiError && error.status >= 500) {
+        setNotice('Login service is temporarily busy. Please try again shortly.');
+      } else {
+        setNotice(error instanceof Error ? error.message : 'Could not log in. Please try again.');
+      }
     } finally {
-      stopBusy();
+      setLoginBusy(false);
     }
   }
 
@@ -1355,6 +1372,8 @@ export default function App() {
     if (!session) return false;
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
+    const idempotencyKey = formElement.dataset.idempotencyKey || crypto.randomUUID();
+    formElement.dataset.idempotencyKey = idempotencyKey;
     const paymentStatus = String(form.get('paymentStatus') || 'ACTIVE') === 'PENDING' ? 'PENDING' : 'ACTIVE';
     const contributorPhone = String(form.get('contributorPhone') || '');
     prepareWhatsAppWindow(paymentStatus);
@@ -1386,7 +1405,7 @@ export default function App() {
             contributorPhone,
             customData,
             groupId: String(form.get('groupId') || '') || undefined,
-            idempotencyKey: crypto.randomUUID(),
+            idempotencyKey,
             paymentMode: String(form.get('paymentMode') || 'CASH') as PaymentMode,
             shopName: String(form.get('shopName') || ''),
             status: paymentStatus,
@@ -1398,6 +1417,7 @@ export default function App() {
       setSlips((current) => [slip, ...current]);
       setSelectedSlip(slip);
       formElement.reset();
+      delete formElement.dataset.idempotencyKey;
       if (paymentStatus === 'PENDING') {
         setNotice(`Pending vargani entry ${slip.slipNumber} saved.`);
         scheduleWorkspaceSync(session, 1200);
@@ -2090,7 +2110,7 @@ export default function App() {
   }
 
   if (!session) {
-    return withActionOverlay(<LoginPanel onSubmit={login} busy={busy} notice={notice} />);
+    return withActionOverlay(<LoginPanel onSubmit={login} busy={loginBusy} notice={notice} />);
   }
 
   if (session.user.role === 'SUPER_ADMIN') {
@@ -2161,7 +2181,7 @@ export default function App() {
       setSelectedSlip={setSelectedSlip}
       setSidebarOpen={setSidebarOpen}
       sidebarOpen={sidebarOpen}
-      slips={filteredSlips}
+      slips={slips}
       tasks={tasks}
       workspaceRefreshing={workspaceRefreshing}
       activeTemplate={activeTemplate}
@@ -2418,88 +2438,165 @@ function AdhyakshApp({
   const [slipFilter, setSlipFilter] = useState<'all' | 'paid' | 'pending'>('all');
   const [slipCreatorFilter, setSlipCreatorFilter] = useState('');
   const [slipDateFilter, setSlipDateFilter] = useState('');
+  const [entriesExporting, setEntriesExporting] = useState(false);
   const mandalIdentity = getMandalIdentity(mandal, session);
   const slipRows = slips;
-  const paidSlipRows = slipRows.filter(isSlipPaid);
-  const pendingSlipRows = slipRows.filter((slip) => !isSlipPaid(slip));
-  const slipCreators = Array.from(
-    new Map(
-      slipRows
-        .filter((slip) => slip.collectedByUserId)
-        .map((slip) => [slip.collectedByUserId!, slip.collector?.name || 'Unknown member']),
-    ),
-  );
-  const filteredSlipRows = (
-    slipFilter === 'paid' ? paidSlipRows : slipFilter === 'pending' ? pendingSlipRows : slipRows
-  ).filter((slip) =>
-    (!slipCreatorFilter || slip.collectedByUserId === slipCreatorFilter)
-    && (!slipDateFilter || slip.createdAt.slice(0, 10) === slipDateFilter),
-  );
-  const totalSlipCollection = paidSlipRows.reduce((sum, slip) => sum + Number(slip.amount || 0), 0);
   const memberUserId = getMemberUserId;
-  const collectionByUser = new Map<string, number>();
-  const collectionByGroup = new Map<string, number>();
-  paidSlipRows.forEach((slip) => {
-    const amount = Number(slip.amount || 0);
-    if (slip.collectedByUserId) {
-      collectionByUser.set(slip.collectedByUserId, (collectionByUser.get(slip.collectedByUserId) ?? 0) + amount);
+  const {
+    entriesByPhone,
+    expensesTotal,
+    groupsWithStats,
+    memberPaidCount,
+    memberPendingCount,
+    memberRows,
+    memberVargani,
+    paidSlipRows,
+    pendingMemberVargani,
+    pendingSlipAmount,
+    pendingSlipRows,
+    slipCreators,
+    totalSlipCollection,
+  } = useMemo(() => {
+    const paid: Slip[] = [];
+    const pending: Slip[] = [];
+    const creatorNames = new Map<string, string>();
+    const collectedByUser = new Map<string, number>();
+    const collectedByGroup = new Map<string, number>();
+    const contributionByPhone = new Map<string, number>();
+    const slipEntriesByPhone = new Map<string, number>();
+    let paidTotal = 0;
+    let pendingTotal = 0;
+
+    for (const slip of slipRows) {
+      const amount = Number(slip.amount || 0);
+      const contributorPhone = slip.contributorPhone;
+      const normalizedPhone = normalizeIndianPhone(contributorPhone);
+      if (contributorPhone) {
+        slipEntriesByPhone.set(contributorPhone, (slipEntriesByPhone.get(contributorPhone) ?? 0) + 1);
+      }
+      if (slip.collectedByUserId) {
+        creatorNames.set(slip.collectedByUserId, slip.collector?.name || 'Unknown member');
+      }
+
+      if (!isSlipPaid(slip)) {
+        pending.push(slip);
+        pendingTotal += amount;
+        continue;
+      }
+
+      paid.push(slip);
+      paidTotal += amount;
+      if (normalizedPhone) {
+        contributionByPhone.set(normalizedPhone, (contributionByPhone.get(normalizedPhone) ?? 0) + amount);
+      }
+      if (slip.collectedByUserId) {
+        collectedByUser.set(slip.collectedByUserId, (collectedByUser.get(slip.collectedByUserId) ?? 0) + amount);
+      }
+      if (slip.groupId) {
+        collectedByGroup.set(slip.groupId, (collectedByGroup.get(slip.groupId) ?? 0) + amount);
+      }
     }
-    if (slip.groupId) {
-      collectionByGroup.set(slip.groupId, (collectionByGroup.get(slip.groupId) ?? 0) + amount);
+
+    const leaderGroupIds = new Set(groups.map((group) => group.leader?.id).filter(Boolean));
+    const rows = members.map((member) => {
+      const phone = member.phone ?? member.user?.phone ?? '';
+      const normalizedPhone = normalizeIndianPhone(phone);
+      const vargani = normalizedPhone ? contributionByPhone.get(normalizedPhone) ?? 0 : 0;
+      const userId = memberUserId(member);
+      const isLeader = leaderGroupIds.has(userId);
+      const isOrphanLeader = member.user?.role === 'GROUP_LEADER' && !isLeader;
+      return {
+        collected: Number(member.collectionTotal ?? collectedByUser.get(userId) ?? 0),
+        contact: phone || '-',
+        groupName: member.group?.name ?? (isOrphanLeader ? 'Needs group assignment' : 'No group'),
+        isLeader,
+        isOrphanLeader,
+        member,
+        name: member.displayName,
+        paidSlipCount: Number(member.paidSlipCount ?? 0),
+        paid: vargani > 0,
+        rawGroupId: member.group?.id ?? member.groupId ?? '',
+        role: member.user?.role.replaceAll('_', ' ') ?? 'Member',
+        vargani,
+      };
+    });
+
+    const rowsByGroup = new Map<string, typeof rows>();
+    const rowByUserId = new Map(rows.map((row) => [memberUserId(row.member), row]));
+    for (const row of rows) {
+      const groupId = row.member.group?.id ?? row.member.groupId;
+      if (!groupId) continue;
+      const groupRows = rowsByGroup.get(groupId);
+      if (groupRows) groupRows.push(row);
+      else rowsByGroup.set(groupId, [row]);
     }
-  });
-  const memberRows = members.map((member) => {
-    const phone = member.phone ?? member.user?.phone ?? '';
-    const memberSlips = slipRows.filter((slip) => phone && normalizeIndianPhone(slip.contributorPhone) === normalizeIndianPhone(phone));
-    const vargani = memberSlips.filter(isSlipPaid).reduce((sum, slip) => sum + Number(slip.amount || 0), 0);
-    const userId = memberUserId(member);
-    const ledGroup = groups.find((group) => group.leader?.id === userId);
-    const isLeader = Boolean(ledGroup);
-    const isOrphanLeader = member.user?.role === 'GROUP_LEADER' && !ledGroup;
+
+    const groupStats = groups.map((group) => {
+      const groupRows = rowsByGroup.get(group.id) ?? [];
+      const leaderRow = group.leader?.id ? rowByUserId.get(group.leader.id) : undefined;
+      const memberRowsForGroup = leaderRow && !groupRows.some((row) => row.member.id === leaderRow.member.id)
+        ? [leaderRow, ...groupRows]
+        : groupRows;
+      let collected = 0;
+      let slipCount = 0;
+      for (const row of memberRowsForGroup) {
+        collected += row.collected;
+        slipCount += row.paidSlipCount;
+      }
+      return {
+        ...group,
+        collected: collected || Number(group.collectionTotal ?? collectedByGroup.get(group.id) ?? 0),
+        memberRows: memberRowsForGroup,
+        memberCount: memberRowsForGroup.length || group._count?.members || group.members?.length || 0,
+        slipCount: slipCount || Number(group.paidSlipCount ?? group._count?.slips ?? 0),
+      };
+    });
+
+    let paidMemberTotal = 0;
+    let pendingMemberTotal = 0;
+    let paidMembers = 0;
+    for (const row of rows) {
+      if (row.paid) {
+        paidMembers += 1;
+        paidMemberTotal += row.vargani;
+      } else {
+        pendingMemberTotal += row.vargani;
+      }
+    }
+
     return {
-      collected: Number(member.collectionTotal ?? collectionByUser.get(userId) ?? 0),
-      contact: phone || '-',
-      groupName: member.group?.name ?? (isOrphanLeader ? 'Needs group assignment' : 'No group'),
-      isLeader,
-      isOrphanLeader,
-      member,
-      name: member.displayName,
-      paidSlipCount: Number(member.paidSlipCount ?? 0),
-      paid: vargani > 0,
-      rawGroupId: member.group?.id ?? member.groupId ?? '',
-      role: member.user?.role.replaceAll('_', ' ') ?? 'Member',
-      vargani,
+      entriesByPhone: slipEntriesByPhone,
+      expensesTotal: expenses.reduce((sum, item) => sum + Number(item.amount || 0), 0),
+      groupsWithStats: groupStats,
+      memberPaidCount: paidMembers,
+      memberPendingCount: rows.length - paidMembers,
+      memberRows: rows,
+      memberVargani: paidMemberTotal,
+      paidSlipRows: paid,
+      pendingMemberVargani: pendingMemberTotal,
+      pendingSlipAmount: pendingTotal,
+      pendingSlipRows: pending,
+      slipCreators: Array.from(creatorNames),
+      totalSlipCollection: paidTotal,
     };
-  });
-  const memberRowsByGroup = new Map<string, typeof memberRows>();
-  memberRows.forEach((row) => {
-    const groupId = row.member.group?.id ?? row.member.groupId;
-    if (!groupId) return;
-    memberRowsByGroup.set(groupId, [...(memberRowsByGroup.get(groupId) ?? []), row]);
-  });
-  const groupsWithStats = groups.map((group) => {
-    const rows = memberRowsByGroup.get(group.id) ?? [];
-    const leaderRow = group.leader?.id ? memberRows.find((row) => memberUserId(row.member) === group.leader?.id) : undefined;
-    const memberRowsForGroup = leaderRow && !rows.some((row) => row.member.id === leaderRow.member.id) ? [leaderRow, ...rows] : rows;
-    const collectedByCurrentMembers = memberRowsForGroup.reduce((sum, row) => sum + row.collected, 0);
-    const slipsByCurrentMembers = memberRowsForGroup.reduce((sum, row) => sum + row.paidSlipCount, 0);
-    return {
-      ...group,
-      collected: collectedByCurrentMembers || Number(group.collectionTotal ?? collectionByGroup.get(group.id) ?? 0),
-      memberRows: memberRowsForGroup,
-      memberCount: memberRowsForGroup.length || group._count?.members || group.members?.length || 0,
-      slipCount: slipsByCurrentMembers || Number(group.paidSlipCount ?? group._count?.slips ?? 0),
-    };
-  });
-  const memberVargani = memberRows.filter((member) => member.paid).reduce((sum, member) => sum + member.vargani, 0);
-  const pendingMemberVargani = memberRows.filter((member) => !member.paid).reduce((sum, member) => sum + member.vargani, 0);
-  const expensesTotal = expenses.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  }, [expenses, groups, members, slipRows]);
+  const filteredSlipRows = useMemo(() => {
+    const source = slipFilter === 'paid' ? paidSlipRows : slipFilter === 'pending' ? pendingSlipRows : slipRows;
+    const normalizedQuery = query.trim().toLowerCase();
+    return source.filter((slip) => {
+      if (slipCreatorFilter && slip.collectedByUserId !== slipCreatorFilter) return false;
+      if (slipDateFilter && slip.createdAt.slice(0, 10) !== slipDateFilter) return false;
+      if (!normalizedQuery) return true;
+      const haystack = `${slip.slipNumber} ${slip.contributorName} ${slip.shopName ?? ''} ${slip.areaName ?? ''} ${slip.collector?.name ?? ''} ${slip.createdAt.slice(0, 10)}`;
+      return haystack.toLowerCase().includes(normalizedQuery);
+    });
+  }, [paidSlipRows, pendingSlipRows, query, slipCreatorFilter, slipDateFilter, slipFilter, slipRows]);
   const balance = totalSlipCollection + memberVargani - expensesTotal;
   const isInitialSync = workspaceRefreshing && !workspaceLoaded;
   const displayNotice = localNotice || (notice && /error|failed|expired|could not|logged out|unauthorized/i.test(notice) ? notice : '');
   const metricValue = (value: string) => (workspaceLoaded ? value : '--');
   const metricNote = (note: string) => (workspaceLoaded ? note : 'Loading live data');
-  const userRows = [
+  const userRows = useMemo(() => [
     {
       email: 'current-login',
       entries: slipRows.length,
@@ -2510,17 +2607,47 @@ function AdhyakshApp({
     },
     ...members.map((member) => ({
       email: member.user?.email ?? '-',
-      entries: slipRows.filter((slip) => slip.contributorPhone && slip.contributorPhone === (member.phone ?? member.user?.phone)).length,
+      entries: entriesByPhone.get(member.phone ?? member.user?.phone ?? '') ?? 0,
       joined: 'Live member',
       member,
       name: member.displayName,
       role: member.user?.role.replaceAll('_', ' ') ?? 'MEMBER',
     })),
-  ];
+  ], [entriesByPhone, members, session.user.name, session.user.role, slipRows.length]);
 
   function showToast(message: string) {
     setLocalNotice(message);
     window.setTimeout(() => setLocalNotice(''), 2800);
+  }
+
+  async function downloadAllVarganiEntries() {
+    const mandalId = mandal?.id;
+    const festivalId = activeForm?.festival.id;
+    if (!mandalId || !festivalId) {
+      showToast('Active mandal festival not found. Refresh and try again.');
+      return;
+    }
+
+    setEntriesExporting(true);
+    try {
+      const { blob, fileName } = await apiDownload(
+        `/mandals/${mandalId}/festivals/${festivalId}/reports/collections.xlsx`,
+        session,
+      );
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = fileName || `${slugify(mandal.name)}-vargani-entries.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      showToast('Excel sheet downloaded successfully.');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not download Excel sheet.');
+    } finally {
+      setEntriesExporting(false);
+    }
   }
 
   async function saveTemplate(placements: Record<string, TemplatePlacement>) {
@@ -2652,9 +2779,9 @@ function AdhyakshApp({
             </div>
             <div className="metric-strip six">
               <Metric label="Total Members" value={metricValue(String(memberRows.length))} />
-              <Metric green label="Member Vargani" note={metricNote(`${memberRows.filter((member) => member.paid).length} Members Paid`)} value={metricValue(money(memberVargani))} />
+              <Metric green label="Member Vargani" note={metricNote(`${memberPaidCount} Members Paid`)} value={metricValue(money(memberVargani))} />
               <Metric green label="Slip Vargani" note={metricNote(`${slipRows.length} Slips Paid`)} value={metricValue(money(totalSlipCollection))} />
-              <Metric red label="Pending (Members)" note={metricNote(`${memberRows.filter((member) => !member.paid).length} Pending`)} value={metricValue(money(pendingMemberVargani))} />
+              <Metric red label="Pending (Members)" note={metricNote(`${memberPendingCount} Pending`)} value={metricValue(money(pendingMemberVargani))} />
               <Metric blue label="Mandal Expenses" note={metricNote('Paid by Mandal')} value={metricValue(money(expensesTotal))} />
               <Metric blue label="Remaining Balance" note={metricNote('Available Funds')} value={metricValue(money(balance))} />
             </div>
@@ -2816,18 +2943,21 @@ function AdhyakshApp({
           <section className="adhyaksh-page">
             <div className="wide-card action-card">
               <div><h2>Vargani Slips</h2><span>Generate and manage vargani receipts.</span></div>
-              <button className="blue-action" onClick={() => setEntryOpen(true)} type="button"><Plus size={18} />New Vargani Entry</button>
+              <div className="vargani-page-actions">
+                <button disabled={entriesExporting} onClick={() => void downloadAllVarganiEntries()} type="button"><Download size={18} />{entriesExporting ? 'Preparing Excel...' : 'Download Excel'}</button>
+                <button className="blue-action" onClick={() => setEntryOpen(true)} type="button"><Plus size={18} />New Vargani Entry</button>
+              </div>
             </div>
             <div className="metric-strip five-cols">
               <Metric label="Total Entries" note={metricNote(mandal?.slipLimit ? `Plan limit: ${mandal.slipLimit} slips` : 'Unlimited plan')} value={metricValue(String(slipRows.length))} />
               <Metric green label="Collected" note={metricNote(`${paidSlipRows.length} Paid`)} value={metricValue(money(totalSlipCollection))} />
-              <Metric red label="Pending" note={metricNote(`${pendingSlipRows.length} Pending`)} value={metricValue(money(pendingSlipRows.reduce((sum, slip) => sum + Number(slip.amount || 0), 0)))} />
+              <Metric red label="Pending" note={metricNote(`${pendingSlipRows.length} Pending`)} value={metricValue(money(pendingSlipAmount))} />
               <Metric green label="Paid Slips" value={metricValue(String(paidSlipRows.length))} />
               <Metric blue label="Pending Slips" value={metricValue(String(pendingSlipRows.length))} />
             </div>
             <div className="slip-insights">
               <div className="insight-card warning">
-                <strong>Pending Location-wise ({money(pendingSlipRows.reduce((sum, slip) => sum + Number(slip.amount || 0), 0))})</strong>
+                <strong>Pending Location-wise ({money(pendingSlipAmount)})</strong>
                 <div className="chips">
                   {pendingSlipRows.length === 0 ? <span>No pending slips</span> : pendingSlipRows.map((slip) => (
                     <span key={`${slip.id}-pending`}>{slip.areaName || 'No area'} {money(Number(slip.amount || 0))}</span>
@@ -4085,11 +4215,8 @@ function SuperAdminApp({
                       mandalId: selectedMandal.id,
                       previewUrl: selectedTemplatePreview,
                     });
-                    setOwnerTemplateDrafts((current) => {
-                      const next = { ...current };
-                      delete next[selectedKey];
-                      return next;
-                    });
+                    // Keep the uploaded preview visible until a reload hydrates the
+                    // newly persisted asset from the backend workspace response.
                   }}
                   templatePreview={selectedTemplatePreview}
                 />
@@ -4297,18 +4424,31 @@ function MemberCollectorApp({
     }
   }, []);
 
-  const paidSlipRows = slips.filter(isSlipPaid);
-  const pendingSlipRows = slips.filter((slip) => !isSlipPaid(slip));
-  const filteredSlipRows = (slipFilter === 'paid' ? paidSlipRows : slipFilter === 'pending' ? pendingSlipRows : slips).filter((slip) => {
-    const query = slipQuery.trim().toLowerCase();
-    if (!query) return true;
-    return [slip.slipNumber, slip.contributorName, slip.shopName, slip.areaName, slip.contributorPhone]
-      .filter(Boolean)
-      .some((value) => String(value).toLowerCase().includes(query));
-  });
-  const collected = paidSlipRows.reduce((sum, slip) => sum + Number(slip.amount), 0);
+  const { collected, filteredSlipRows, paidSlipRows, pendingSlipRows } = useMemo(() => {
+    const paid = slips.filter(isSlipPaid);
+    const pending = slips.filter((slip) => !isSlipPaid(slip));
+    const source = slipFilter === 'paid' ? paid : slipFilter === 'pending' ? pending : slips;
+    const normalizedQuery = slipQuery.trim().toLowerCase();
+    const filtered = normalizedQuery
+      ? source.filter((slip) =>
+          [slip.slipNumber, slip.contributorName, slip.shopName, slip.areaName, slip.contributorPhone]
+            .filter(Boolean)
+            .some((value) => String(value).toLowerCase().includes(normalizedQuery)),
+        )
+      : source;
+
+    return {
+      collected: paid.reduce((sum, slip) => sum + Number(slip.amount), 0),
+      filteredSlipRows: filtered,
+      paidSlipRows: paid,
+      pendingSlipRows: pending,
+    };
+  }, [slipFilter, slipQuery, slips]);
   const paidSlips = paidSlipRows.length;
-  const openTasks = tasks.filter((task) => task.status !== 'DONE' && task.status !== 'CANCELLED');
+  const openTasks = useMemo(
+    () => tasks.filter((task) => task.status !== 'DONE' && task.status !== 'CANCELLED'),
+    [tasks],
+  );
   const doneTasks = tasks.filter((task) => task.status === 'DONE');
   const roleLabel = session.user.role === 'GROUP_LEADER' ? 'Group Leader' : 'Collection Member';
 
@@ -5297,7 +5437,10 @@ function numberBelowThousandMarathi(value: number): string {
   const parts: string[] = [];
 
   if (hundreds > 0) {
-    parts.push(hundreds === 1 ? 'शंभर' : `${MARATHI_NUMBER_BELOW_HUNDRED[hundreds]}शे`);
+    // Marathi uses "शंभर" for exactly 100, but "एकशे" when more digits follow.
+    parts.push(hundreds === 1
+      ? (remainder === 0 ? 'शंभर' : 'एकशे')
+      : `${MARATHI_NUMBER_BELOW_HUNDRED[hundreds]}शे`);
   }
 
   if (remainder > 0) {
@@ -5677,8 +5820,12 @@ function TemplateView({
     if (Object.keys(backendPlacements).length > 0) {
       setPlacements(backendPlacements);
     }
-    if (latestTemplateBackground) {
-      onPreviewChange(resolveTemplateAssetUrl(latestTemplateBackground));
+    const hasUnsavedPreview = templatePreview.startsWith('data:') || templatePreview.startsWith('blob:');
+    if (latestTemplateBackground && !hasUnsavedPreview) {
+      const resolvedBackground = resolveTemplateAssetUrl(latestTemplateBackground);
+      if (resolvedBackground !== templatePreview) {
+        onPreviewChange(resolvedBackground);
+      }
     }
   }, [latestTemplateBackground, latestTemplateFields, latestTemplateVersion?.id]);
 
