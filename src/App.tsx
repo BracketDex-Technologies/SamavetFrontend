@@ -44,7 +44,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, PointerEvent, ReactNode } from 'react';
-import { ApiError, apiRequest } from './api/client';
+import { ApiError, apiDownload, apiRequest } from './api/client';
 
 type PaymentMode = 'CASH' | 'UPI' | 'CHEQUE' | 'BANK_TRANSFER' | 'OTHER';
 type TextAlign = 'left' | 'center' | 'right';
@@ -2438,6 +2438,7 @@ function AdhyakshApp({
   const [slipFilter, setSlipFilter] = useState<'all' | 'paid' | 'pending'>('all');
   const [slipCreatorFilter, setSlipCreatorFilter] = useState('');
   const [slipDateFilter, setSlipDateFilter] = useState('');
+  const [entriesExporting, setEntriesExporting] = useState(false);
   const mandalIdentity = getMandalIdentity(mandal, session);
   const slipRows = slips;
   const memberUserId = getMemberUserId;
@@ -2617,6 +2618,36 @@ function AdhyakshApp({
   function showToast(message: string) {
     setLocalNotice(message);
     window.setTimeout(() => setLocalNotice(''), 2800);
+  }
+
+  async function downloadAllVarganiEntries() {
+    const mandalId = mandal?.id;
+    const festivalId = activeForm?.festival.id;
+    if (!mandalId || !festivalId) {
+      showToast('Active mandal festival not found. Refresh and try again.');
+      return;
+    }
+
+    setEntriesExporting(true);
+    try {
+      const { blob, fileName } = await apiDownload(
+        `/mandals/${mandalId}/festivals/${festivalId}/reports/collections.xlsx`,
+        session,
+      );
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = fileName || `${slugify(mandal.name)}-vargani-entries.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      showToast('Excel sheet downloaded successfully.');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not download Excel sheet.');
+    } finally {
+      setEntriesExporting(false);
+    }
   }
 
   async function saveTemplate(placements: Record<string, TemplatePlacement>) {
@@ -2912,7 +2943,10 @@ function AdhyakshApp({
           <section className="adhyaksh-page">
             <div className="wide-card action-card">
               <div><h2>Vargani Slips</h2><span>Generate and manage vargani receipts.</span></div>
-              <button className="blue-action" onClick={() => setEntryOpen(true)} type="button"><Plus size={18} />New Vargani Entry</button>
+              <div className="vargani-page-actions">
+                <button disabled={entriesExporting} onClick={() => void downloadAllVarganiEntries()} type="button"><Download size={18} />{entriesExporting ? 'Preparing Excel...' : 'Download Excel'}</button>
+                <button className="blue-action" onClick={() => setEntryOpen(true)} type="button"><Plus size={18} />New Vargani Entry</button>
+              </div>
             </div>
             <div className="metric-strip five-cols">
               <Metric label="Total Entries" note={metricNote(mandal?.slipLimit ? `Plan limit: ${mandal.slipLimit} slips` : 'Unlimited plan')} value={metricValue(String(slipRows.length))} />
@@ -4181,11 +4215,8 @@ function SuperAdminApp({
                       mandalId: selectedMandal.id,
                       previewUrl: selectedTemplatePreview,
                     });
-                    setOwnerTemplateDrafts((current) => {
-                      const next = { ...current };
-                      delete next[selectedKey];
-                      return next;
-                    });
+                    // Keep the uploaded preview visible until a reload hydrates the
+                    // newly persisted asset from the backend workspace response.
                   }}
                   templatePreview={selectedTemplatePreview}
                 />
@@ -5406,7 +5437,10 @@ function numberBelowThousandMarathi(value: number): string {
   const parts: string[] = [];
 
   if (hundreds > 0) {
-    parts.push(hundreds === 1 ? 'शंभर' : `${MARATHI_NUMBER_BELOW_HUNDRED[hundreds]}शे`);
+    // Marathi uses "शंभर" for exactly 100, but "एकशे" when more digits follow.
+    parts.push(hundreds === 1
+      ? (remainder === 0 ? 'शंभर' : 'एकशे')
+      : `${MARATHI_NUMBER_BELOW_HUNDRED[hundreds]}शे`);
   }
 
   if (remainder > 0) {
@@ -5786,8 +5820,12 @@ function TemplateView({
     if (Object.keys(backendPlacements).length > 0) {
       setPlacements(backendPlacements);
     }
-    if (latestTemplateBackground) {
-      onPreviewChange(resolveTemplateAssetUrl(latestTemplateBackground));
+    const hasUnsavedPreview = templatePreview.startsWith('data:') || templatePreview.startsWith('blob:');
+    if (latestTemplateBackground && !hasUnsavedPreview) {
+      const resolvedBackground = resolveTemplateAssetUrl(latestTemplateBackground);
+      if (resolvedBackground !== templatePreview) {
+        onPreviewChange(resolvedBackground);
+      }
     }
   }, [latestTemplateBackground, latestTemplateFields, latestTemplateVersion?.id]);
 

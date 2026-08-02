@@ -52,6 +52,29 @@ export async function apiRequest<T>(
   return readResponse<T>(response);
 }
 
+export async function apiDownload(
+  path: string,
+  session?: ApiAuthSession | null,
+): Promise<{ blob: Blob; fileName?: string }> {
+  let response = await fetchWithAuth(path, { headers: { Accept: 'application/octet-stream' } }, session);
+
+  if (response.status === 401 && session?.refreshToken) {
+    const refreshed = await refreshSessionOnce(session);
+    if (refreshed) {
+      response = await fetchWithAuth(path, { headers: { Accept: 'application/octet-stream' } }, session);
+    }
+  }
+
+  if (!response.ok) {
+    throw new ApiError(readErrorMessage(await response.text(), response.status), response.status);
+  }
+
+  return {
+    blob: await response.blob(),
+    fileName: readAttachmentFileName(response.headers.get('Content-Disposition')),
+  };
+}
+
 async function fetchWithAuth(path: string, options: ApiRequestOptions, session?: ApiAuthSession | null) {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs ?? REQUEST_TIMEOUT_MS);
@@ -143,4 +166,9 @@ function readErrorMessage(body: string, status: number) {
   } catch {
     return `Request failed with ${status}`;
   }
+}
+
+function readAttachmentFileName(contentDisposition: string | null) {
+  const match = contentDisposition?.match(/filename="?([^";]+)"?/i);
+  return match?.[1];
 }
