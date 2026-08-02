@@ -42,9 +42,14 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, PointerEvent, ReactNode } from 'react';
-import { ApiError, apiDownload, apiRequest } from './api/client';
+import { ApiError, apiDownload, apiRequest, sessionForStorage } from './api/client';
+import {
+  focusFormErrorFromMessage,
+  setFormFieldError,
+  useGlobalFormErrorNavigation,
+} from './forms/useFormErrorNavigation';
 
 type PaymentMode = 'CASH' | 'UPI' | 'CHEQUE' | 'BANK_TRANSFER' | 'OTHER';
 type TextAlign = 'left' | 'center' | 'right';
@@ -133,6 +138,24 @@ interface AuthSession {
   user: { id: string; mandalId: string | null; name: string; role: UserRole };
 }
 
+async function requestAzureMarathiTransliteration(
+  text: string,
+  session: AuthSession,
+  signal: AbortSignal,
+) {
+  const response = await apiRequest<{ text: string }>(
+    '/translation/marathi/transliterate',
+    {
+      body: JSON.stringify({ text: text.trim() }),
+      method: 'POST',
+      signal,
+      timeoutMs: 2_500,
+    },
+    session,
+  );
+  return response.text.trim();
+}
+
 interface CustomField {
   dashboardFilter?: boolean;
   id: string;
@@ -153,6 +176,7 @@ type EntryFieldKey =
   | 'areaName'
   | 'groupId'
   | 'contributorAddress'
+  | 'contributorAddressMr'
   | 'contributorPhone'
   | 'paymentStatus'
   | 'paymentMode'
@@ -175,6 +199,7 @@ const DEFAULT_ENTRY_FIELDS: EntryFieldConfig[] = [
   { key: 'areaName', label: 'Location / Area', required: false, type: 'TEXT', visible: false },
   { key: 'groupId', label: 'Collection Group', required: false, type: 'DROPDOWN', visible: true },
   { key: 'contributorAddress', label: 'Address', required: false, type: 'LONG TEXT', visible: true },
+  { key: 'contributorAddressMr', label: 'Address on Marathi Slip', required: false, type: 'LONG TEXT', visible: true },
   { key: 'contributorPhone', label: 'WhatsApp Number', required: false, type: 'PHONE', visible: true },
   { key: 'paymentStatus', label: 'Payment Status', required: true, locked: true, type: 'CHOICE', visible: true },
   { key: 'paymentMode', label: 'Payment Mode', required: true, type: 'DROPDOWN', visible: true },
@@ -197,8 +222,10 @@ function normalizeEntryFields(value: unknown): EntryFieldConfig[] {
 }
 
 interface Festival {
+  endDate?: string;
   id: string;
   name: string;
+  startDate?: string;
   status: string;
   templates?: Template[];
   targetAmount?: number | string | null;
@@ -368,6 +395,29 @@ interface DemoMandal {
   status?: string;
   users?: MandalLoginUser[];
   whatsappMode?: 'AUTO_API' | 'MANUAL_SHARE';
+  whatsappTemplateLanguage?: string | null;
+  whatsappTemplateName?: string | null;
+  whatsappTemplateVariableCount?: number | null;
+  whatsappTemplateWid?: string | null;
+}
+
+interface AuthkeyWhatsAppTemplate {
+  approved: boolean;
+  body: string;
+  category: string;
+  compatible: boolean;
+  language: string;
+  name: string;
+  rejectionReason?: string | null;
+  variableCount: number;
+  wid: string;
+}
+
+interface AuthkeyWhatsAppTemplateCatalog {
+  cached: boolean;
+  defaultWid: string | null;
+  items: AuthkeyWhatsAppTemplate[];
+  syncedAt: string;
 }
 
 interface MandalLoginUser {
@@ -420,6 +470,14 @@ interface MandalWorkspaceBootstrap {
 }
 
 type WorkspaceBootstrap = OwnerWorkspaceBootstrap | MandalWorkspaceBootstrap;
+type MandalMetrics = NonNullable<MandalWorkspaceBootstrap['metrics']>;
+type SlipPageMeta = MandalWorkspaceBootstrap['slips']['meta'];
+interface SlipListFilters {
+  createdByUserId?: string;
+  date?: string;
+  search?: string;
+  status?: 'ACTIVE' | 'PENDING';
+}
 
 const SESSION_KEY = 'digital-vargani-admin-session';
 const SESSION_EXPIRED_EVENT = 'digital-vargani-session-expired';
@@ -541,6 +599,7 @@ function loadSlipBackground(url: string) {
 }
 
 export default function App() {
+  useGlobalFormErrorNavigation();
   const queryClient = useQueryClient();
   const [session, setSession] = useState<AuthSession | null>(null);
   const [activeForm, setActiveForm] = useState<ActiveForm | null>(null);
@@ -548,6 +607,10 @@ export default function App() {
   const [members, setMembers] = useState<Member[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [slips, setSlips] = useState<Slip[]>([]);
+  const [slipMeta, setSlipMeta] = useState<SlipPageMeta>({ limit: 25, page: 1, total: 0, totalPages: 0 });
+  const [workspaceMetrics, setWorkspaceMetrics] = useState<MandalMetrics>({});
+  const [loadingMoreSlips, setLoadingMoreSlips] = useState(false);
+  const [slipListFilters, setSlipListFilters] = useState<SlipListFilters>({});
   const [tasks, setTasks] = useState<FestivalTask[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [, setSelectedSlip] = useState<Slip | null>(null);
@@ -563,6 +626,7 @@ export default function App() {
   const [busyMessage, setBusyMessage] = useState('');
   const [workspaceRefreshing, setWorkspaceRefreshing] = useState(false);
   const [workspaceLoaded, setWorkspaceLoaded] = useState(false);
+  const [yearChanging, setYearChanging] = useState(false);
   const [demoMandals, setDemoMandals] = useState<DemoMandal[]>([]);
   const [currentMandal, setCurrentMandal] = useState<DemoMandal | null>(null);
   const [collectorModalOpen, setCollectorModalOpen] = useState(false);
@@ -640,6 +704,9 @@ export default function App() {
 
       try {
         const parsed = JSON.parse(stored) as AuthSession;
+        // One-time migration: remove credentials persisted by older releases
+        // while retaining the in-memory token long enough to rotate the session.
+        window.localStorage.setItem(SESSION_KEY, JSON.stringify(sessionForStorage(parsed)));
         setSession(parsed);
         const cachedWorkspace = readWorkspaceCache(parsed);
         if (cachedWorkspace) {
@@ -675,6 +742,8 @@ export default function App() {
       setCurrentMandal(null);
       setExpenses([]);
       setSlips([]);
+      setSlipMeta({ limit: 25, page: 1, total: 0, totalPages: 0 });
+      setWorkspaceMetrics({});
       setTasks([]);
       setTemplates([]);
       setSelectedSlip(null);
@@ -812,6 +881,7 @@ export default function App() {
 
     if (!label) {
       setNotice('Enter a field label before adding it.');
+      setFormFieldError(formElement, 'label', 'Enter a field label before adding it.');
       return;
     }
 
@@ -840,6 +910,7 @@ export default function App() {
       scheduleWorkspaceSync(session);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not add form question.');
+      focusFormErrorFromMessage(formElement, error);
     }
   }
 
@@ -901,6 +972,8 @@ export default function App() {
       setMembers([]);
       setExpenses([]);
       setSlips([]);
+      setSlipMeta({ limit: 25, page: 1, total: 0, totalPages: 0 });
+      setWorkspaceMetrics({});
       setTasks([]);
       setTemplates([]);
       setSelectedSlip(null);
@@ -929,6 +1002,9 @@ export default function App() {
     setMembers(activeMembers);
     setExpenses([]);
     setSlips(nextSlips);
+    setSlipMeta(payload.slips.meta);
+    setWorkspaceMetrics(payload.metrics ?? {});
+    setSlipListFilters({});
     setTasks([]);
     setTemplates(payload.templates);
     setSelectedSlip(nextSlips[0] ?? null);
@@ -962,11 +1038,12 @@ export default function App() {
   async function uploadRenderedSlipImage(slip: Slip) {
     if (!session) throw new Error('Login again to upload receipt image.');
     const blob = await renderSlipJpegBlob(slip);
-    const dataUrl = await blobToDataUrl(blob);
+    const formData = new FormData();
+    formData.append('file', blob, `${slip.slipNumber || slip.id}.jpg`);
     const upload = await apiRequest<{ ok: boolean; receiptImageUrl: string; storage: string }>(
-      `/vargani/slips/${slip.id}/receipt-image`,
+      `/vargani/slips/${slip.id}/receipt-image-file`,
       {
-        body: JSON.stringify({ dataUrl }),
+        body: formData,
         method: 'POST',
       },
       session,
@@ -988,16 +1065,19 @@ export default function App() {
 
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const identifier = String(form.get('identifier') || '').trim();
     const password = String(form.get('password') || '');
 
     if (!identifier) {
       setNotice('Enter your username.');
+      setFormFieldError(formElement, 'identifier', 'Enter your username.');
       return;
     }
     if (password.length < 8) {
       setNotice('Password must contain at least 8 characters.');
+      setFormFieldError(formElement, 'password', 'Password must contain at least 8 characters.');
       return;
     }
 
@@ -1012,7 +1092,7 @@ export default function App() {
         method: 'POST',
         timeoutMs: 12_000,
       });
-      window.localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession));
+      window.localStorage.setItem(SESSION_KEY, JSON.stringify(sessionForStorage(nextSession)));
       setSession(nextSession);
       setWorkspaceLoaded(false);
       setNotice('');
@@ -1027,6 +1107,7 @@ export default function App() {
       } else {
         setNotice(error instanceof Error ? error.message : 'Could not log in. Please try again.');
       }
+      focusFormErrorFromMessage(formElement, error);
     } finally {
       setLoginBusy(false);
     }
@@ -1054,6 +1135,8 @@ export default function App() {
     setCurrentMandal(null);
     setExpenses([]);
     setSlips([]);
+    setSlipMeta({ limit: 25, page: 1, total: 0, totalPages: 0 });
+    setWorkspaceMetrics({});
     setTasks([]);
     setTemplates([]);
     setSelectedSlip(null);
@@ -1067,17 +1150,14 @@ export default function App() {
     if (workspaceSyncInFlightRef.current) return workspaceSyncInFlightRef.current;
     const sync = (async () => {
       try {
-        const workspace = await apiRequest<WorkspaceBootstrap>('/workspace/bootstrap', {}, currentSession);
-        queryClient.setQueryData(workspaceQueryKey(currentSession), workspace);
-        writeWorkspaceCache(currentSession, workspace);
-        applyWorkspaceBootstrap(workspace);
-        if (workspace.kind === 'MANDAL' && currentSession.user.mandalId && workspace.activeForm?.festival.id) {
-          const festivalPath = `/mandals/${currentSession.user.mandalId}/festivals/${workspace.activeForm.festival.id}`;
-          const liveTasks = await apiRequest<FestivalTask[]>(`${festivalPath}/tasks`, {}, currentSession);
-          setTasks(liveTasks);
-        }
+        const summary = await apiRequest<{ kind: 'MANDAL' | 'OWNER'; metrics: Record<string, number> }>(
+          '/workspace/summary',
+          {},
+          currentSession,
+        );
+        if (summary.kind === 'MANDAL') setWorkspaceMetrics(summary.metrics);
       } catch {
-        // Keep the optimistic UI. The next manual refresh will reconcile if the quiet sync fails.
+        // Keep the optimistic UI. A manual refresh performs the full reconciliation.
       }
     })().finally(() => {
       workspaceSyncInFlightRef.current = null;
@@ -1094,6 +1174,50 @@ export default function App() {
       void syncWorkspaceQuietly(currentSession);
     }, delay);
   }
+
+  async function loadMoreSlips() {
+    if (!session || loadingMoreSlips || slipMeta.page >= slipMeta.totalPages) return;
+    setLoadingMoreSlips(true);
+    try {
+      const params = new URLSearchParams({ limit: String(slipMeta.limit), page: String(slipMeta.page + 1) });
+      Object.entries(slipListFilters).forEach(([key, value]) => { if (value) params.set(key, value); });
+      const nextPage = await apiRequest<{ items: Slip[]; meta: SlipPageMeta }>(
+        `/vargani/slips?${params.toString()}`,
+        {},
+        session,
+      );
+      setSlips((current) => {
+        const knownIds = new Set(current.map((slip) => slip.id));
+        return [...current, ...nextPage.items.filter((slip) => !knownIds.has(slip.id))];
+      });
+      setSlipMeta(nextPage.meta);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not load more slips.');
+    } finally {
+      setLoadingMoreSlips(false);
+    }
+  }
+
+  const filterSlips = useCallback(async (filters: SlipListFilters) => {
+    if (!session) return;
+    setLoadingMoreSlips(true);
+    try {
+      const params = new URLSearchParams({ limit: '25', page: '1' });
+      Object.entries(filters).forEach(([key, value]) => { if (value) params.set(key, value); });
+      const page = await apiRequest<{ items: Slip[]; meta: SlipPageMeta }>(
+        `/vargani/slips?${params.toString()}`,
+        {},
+        session,
+      );
+      setSlipListFilters(filters);
+      setSlips(page.items);
+      setSlipMeta(page.meta);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not filter slips.');
+    } finally {
+      setLoadingMoreSlips(false);
+    }
+  }, [session]);
 
   async function loadWorkspace(currentSession = session) {
     if (!currentSession) return;
@@ -1131,6 +1255,27 @@ export default function App() {
     }
   }
 
+  async function changeFestivalYear(year: number) {
+    if (!session?.user.mandalId || yearChanging) return;
+    if (festivalYear(activeForm?.festival) === year) return;
+
+    setYearChanging(true);
+    setNotice(`Opening Year ${year}...`);
+    try {
+      await apiRequest(
+        `/mandals/${session.user.mandalId}/festivals/years/${year}/activate`,
+        { method: 'POST', timeoutMs: 30_000 },
+        session,
+      );
+      await loadWorkspace(session);
+      setNotice(`Year ${year} is active. Entries are saved separately for this year.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : `Could not open Year ${year}.`);
+    } finally {
+      setYearChanging(false);
+    }
+  }
+
   async function createMember(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!session || !mandalId || !festivalId) return false;
@@ -1143,10 +1288,12 @@ export default function App() {
     const normalizedPhone = normalizeIndianPhone(rawPhone);
     if (password.length < 8) {
       setNotice('Member password must contain at least 8 characters.');
+      setFormFieldError(formElement, 'password', 'Member password must contain at least 8 characters.');
       return false;
     }
     if (rawPhone && !/^91[6-9]\d{9}$/.test(normalizedPhone)) {
       setNotice('Enter a valid 10-digit Indian mobile number, for example 9876543210.');
+      setFormFieldError(formElement, 'phone', 'Enter a valid 10-digit Indian mobile number, for example 9876543210.');
       return false;
     }
     try {
@@ -1174,6 +1321,7 @@ export default function App() {
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not create member login.');
+      focusFormErrorFromMessage(formElement, error);
       return false;
     }
   }
@@ -1185,6 +1333,7 @@ export default function App() {
     const logo = form.get('logo');
     const generatedPassword = generateTemporaryPassword();
     const mandalName = String(form.get('name') || '').trim();
+    const adminPassword = String(form.get('adminPassword') || generatedPassword);
     const contactPhone = normalizeOptionalIndianPhone(String(form.get('contactPhone') || ''));
     let logoDataUrl = '';
     const newMandal: DemoMandal = {
@@ -1192,7 +1341,7 @@ export default function App() {
       address: String(form.get('address') || '').trim(),
       adhyakshName: String(form.get('adhyakshName') || '').trim(),
       adminEmail: String(form.get('adminEmail') || `admin@${slugify(mandalName || 'mandal')}.local`).trim(),
-      adminPassword: String(form.get('adminPassword') || generatedPassword),
+      adminPassword,
       city: String(form.get('city') || '').trim(),
       contactEmail: String(form.get('contactEmail') || '').trim(),
       contactPhone,
@@ -1207,11 +1356,20 @@ export default function App() {
 
     if (!newMandal.name) {
       setNotice('Mandal name is required.');
+      setFormFieldError(formElement, 'name', 'Mandal name is required.');
+      return { ok: false };
+    }
+
+    if (adminPassword.length < 12) {
+      const message = 'Adhyaksh password must contain at least 12 characters.';
+      setNotice(message);
+      setFormFieldError(formElement, 'adminPassword', message);
       return { ok: false };
     }
 
     if (String(form.get('contactPhone') || '').trim() && !contactPhone) {
       setNotice('Enter phone as +919876543210 or a valid 10 digit Indian number.');
+      setFormFieldError(formElement, 'contactPhone', 'Enter phone as +919876543210 or a valid 10 digit Indian number.');
       return { ok: false };
     }
 
@@ -1256,6 +1414,7 @@ export default function App() {
         return { id: created.mandal.id, ok: true };
       } catch (error) {
         setNotice(error instanceof Error ? error.message : 'Could not add mandal.');
+        focusFormErrorFromMessage(formElement, error);
         return { ok: false };
       } finally {
         stopBusy();
@@ -1389,6 +1548,10 @@ export default function App() {
     if (contributorNameMr) {
       customData.contributorNameMr = contributorNameMr;
     }
+    const contributorAddressMr = String(form.get('contributorAddressMr') || '').trim();
+    if (contributorAddressMr) {
+      customData.contributorAddressMr = contributorAddressMr;
+    }
     const tentativePaymentDate = String(form.get('tentativePaymentDate') || '');
     if (tentativePaymentDate) {
       customData.tentativePaymentDate = tentativePaymentDate;
@@ -1446,6 +1609,7 @@ export default function App() {
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not generate slip.');
+      focusFormErrorFromMessage(formElement, error);
       return false;
     }
   }
@@ -1494,7 +1658,8 @@ export default function App() {
         amountWords: amountToIndianWords(rawAmount),
         amountWordsMarathi: amountToMarathiWords(rawAmount),
         building_name: slip.customData?.building_name || sampleFieldValue('building_name', 'Building / Lane'),
-        contributorAddress: slip.contributorAddress || sampleFieldValue('contributorAddress', 'Address'),
+        contributorAddress: String(slip.customData?.contributorAddressMr || '').trim() || slip.contributorAddress || sampleFieldValue('contributorAddress', 'Address'),
+        contributorAddressMr: String(slip.customData?.contributorAddressMr || '').trim() || transliterateReceiptTextToMarathi(slip.contributorAddress || ''),
         contributorName: String(slip.customData?.contributorNameMr || '').trim() || slip.contributorName || sampleFieldValue('contributorName', 'Name'),
         contributorNameMr: String(slip.customData?.contributorNameMr || '').trim() || transliterateReceiptTextToMarathi(slip.contributorName || ''),
         contributorPhone: slip.contributorPhone || sampleFieldValue('contributorPhone', 'Mobile No.'),
@@ -1682,6 +1847,7 @@ export default function App() {
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not save expense.');
+      focusFormErrorFromMessage(formElement, error);
       return false;
     }
   }
@@ -1760,7 +1926,10 @@ export default function App() {
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     const name = String(form.get('name') || '').trim();
-    if (!name) return false;
+    if (!name) {
+      setFormFieldError(formElement, 'name', 'Group name is required.');
+      return false;
+    }
     try {
       const group = await apiRequest<Group>(
         `/mandals/${mandalId}/festivals/${festivalId}/groups`,
@@ -1781,6 +1950,7 @@ export default function App() {
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not create group.');
+      focusFormErrorFromMessage(formElement, error);
       return false;
     }
   }
@@ -1809,7 +1979,10 @@ export default function App() {
     if (!session || !mandalId || !festivalId) return false;
     const formElement = event.currentTarget;
     const payload = taskPayloadFromForm(new FormData(formElement));
-    if (!payload.title) return false;
+    if (!payload.title) {
+      setFormFieldError(formElement, 'title', 'Task title is required.');
+      return false;
+    }
     try {
       const task = await apiRequest<FestivalTask>(
         `/mandals/${mandalId}/festivals/${festivalId}/tasks`,
@@ -1825,6 +1998,7 @@ export default function App() {
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not add task.');
+      focusFormErrorFromMessage(formElement, error);
       return false;
     }
   }
@@ -2003,6 +2177,22 @@ export default function App() {
       placeholder: 'Enter contributor name',
       title: 'Contributor name',
     }) ?? slip.contributorName;
+    const contributorAddress = await askPrompt({
+      defaultValue: slip.contributorAddress || '',
+      multiline: true,
+      placeholder: 'Enter contributor address',
+      title: 'Contributor address',
+    });
+    if (contributorAddress === null) return;
+    const contributorAddressMr = await askPrompt({
+      defaultValue: String(slip.customData?.contributorAddressMr || '').trim()
+        || transliterateReceiptTextToMarathi(contributorAddress),
+      message: 'Review and correct the Marathi spelling exactly as it should appear on the slip.',
+      multiline: true,
+      placeholder: 'मराठी पत्ता',
+      title: 'Address on Marathi slip',
+    });
+    if (contributorAddressMr === null) return;
     const statusInput = (await askPrompt({
       defaultValue: isSlipPaid(slip) ? 'ACTIVE' : 'PENDING',
       message: 'Use ACTIVE for paid slips or PENDING for unpaid slips.',
@@ -2017,10 +2207,13 @@ export default function App() {
           body: JSON.stringify({
             amount: Number(amount),
             areaName: slip.areaName,
-            contributorAddress: slip.contributorAddress,
+            contributorAddress,
             contributorName,
             contributorPhone: slip.contributorPhone,
-            customData: slip.customData ?? {},
+            customData: {
+              ...slip.customData,
+              contributorAddressMr: contributorAddressMr.trim(),
+            },
             paymentMode: slip.paymentMode,
             shopName: slip.shopName,
             status,
@@ -2094,7 +2287,9 @@ export default function App() {
         modalOpen={collectorModalOpen}
         notice={notice}
         onDownloadSlip={downloadSlipAsJpeg}
+        onFilterSlips={filterSlips}
         onGenerate={generateSlip}
+        onLoadMoreSlips={loadMoreSlips}
         onLogout={logout}
         onModalChange={setCollectorModalOpen}
         onPrepareWhatsApp={prepareWhatsAppWindow}
@@ -2103,8 +2298,11 @@ export default function App() {
         mandal={currentMandal}
         session={session}
         setSelectedSlip={setSelectedSlip}
+        slipMeta={slipMeta}
         slips={slips}
         tasks={tasks}
+        workspaceMetrics={workspaceMetrics}
+        loadingMoreSlips={loadingMoreSlips}
       />,
     );
   }
@@ -2165,10 +2363,13 @@ export default function App() {
       onEditSlip={updateSlip}
       onEditTask={(task, event) => updateTask(task, event)}
       onGenerate={generateSlip}
+      onFilterSlips={filterSlips}
+      onLoadMoreSlips={loadMoreSlips}
       onLogout={logout}
       onPrompt={askPrompt}
       onRemindMember={remindMember}
       onRefresh={() => loadWorkspace()}
+      onYearChange={changeFestivalYear}
       onShareSlip={shareSlip}
       onTemplateSaved={(placements) => saveTemplateConfig(placements)}
       onTaskDone={(task) => updateTask(task, { status: 'DONE' })}
@@ -2181,15 +2382,19 @@ export default function App() {
       setSelectedSlip={setSelectedSlip}
       setSidebarOpen={setSidebarOpen}
       sidebarOpen={sidebarOpen}
+      slipMeta={slipMeta}
       slips={slips}
       tasks={tasks}
       workspaceRefreshing={workspaceRefreshing}
+      yearChanging={yearChanging}
       activeTemplate={activeTemplate}
       latestTemplateVersion={latestTemplateVersion}
       onPreviewChange={handlePreviewChange}
       onPrepareWhatsApp={prepareWhatsAppWindow}
       templatePreview={templatePreview}
       workspaceLoaded={workspaceLoaded}
+      workspaceMetrics={workspaceMetrics}
+      loadingMoreSlips={loadingMoreSlips}
     />,
   );
 }
@@ -2348,12 +2553,15 @@ function AdhyakshApp({
   onEditSlip,
   onEditTask,
   onGenerate,
+  onFilterSlips,
+  onLoadMoreSlips,
   onLogout,
   onPreviewChange,
   onPrepareWhatsApp,
   onPrompt,
   onRemindMember,
   onRefresh,
+  onYearChange,
   onShareSlip,
   onTemplateSaved,
   onTaskDone,
@@ -2366,11 +2574,15 @@ function AdhyakshApp({
   setSelectedSlip,
   setSidebarOpen,
   sidebarOpen,
+  slipMeta,
   slips,
   tasks,
   templatePreview,
   workspaceLoaded,
+  workspaceMetrics,
   workspaceRefreshing,
+  yearChanging,
+  loadingMoreSlips,
 }: {
   activeTemplate?: Template;
   activeForm: ActiveForm | null;
@@ -2400,12 +2612,15 @@ function AdhyakshApp({
   onEditSlip: (slip: Slip) => Promise<void> | void;
   onEditTask: (task: FestivalTask, event: FormEvent<HTMLFormElement>) => Promise<void> | void;
   onGenerate: (event: FormEvent<HTMLFormElement>) => Promise<boolean | void> | boolean | void;
+  onFilterSlips: (filters: SlipListFilters) => Promise<void> | void;
+  onLoadMoreSlips: () => Promise<void> | void;
   onLogout: () => void;
   onPreviewChange: (url: string) => void;
   onPrepareWhatsApp: (paymentStatus: 'ACTIVE' | 'PENDING') => void;
   onPrompt: (options: ThemedPromptOptions) => Promise<string | null>;
   onRemindMember: (member: Member) => void;
   onRefresh: () => void;
+  onYearChange: (year: number) => Promise<void> | void;
   onShareSlip: (slip: Slip) => Promise<void>;
   onTemplateSaved: (placements: Record<string, TemplatePlacement>) => Promise<void> | void;
   onTaskDone: (task: FestivalTask) => Promise<void> | void;
@@ -2418,11 +2633,15 @@ function AdhyakshApp({
   setSelectedSlip: (slip: Slip) => void;
   setSidebarOpen: (value: boolean | ((open: boolean) => boolean)) => void;
   sidebarOpen: boolean;
+  slipMeta: SlipPageMeta;
   slips: Slip[];
   tasks: FestivalTask[];
   templatePreview: string;
   workspaceLoaded: boolean;
+  workspaceMetrics: MandalMetrics;
   workspaceRefreshing: boolean;
+  yearChanging: boolean;
+  loadingMoreSlips: boolean;
 }) {
   const [screen, setScreen] = useState<AdhyakshScreen>(() => parseAdhyakshRoute() ?? 'members');
   const [entryOpen, setEntryOpen] = useState(false);
@@ -2439,8 +2658,30 @@ function AdhyakshApp({
   const [slipCreatorFilter, setSlipCreatorFilter] = useState('');
   const [slipDateFilter, setSlipDateFilter] = useState('');
   const [entriesExporting, setEntriesExporting] = useState(false);
+  const deferredQuery = useDeferredValue(query);
+  const slipFilterStartedRef = useRef(false);
+  const activeYear = festivalYear(activeForm?.festival);
+  const currentYear = new Date().getFullYear();
+  const yearOptions = Array.from(new Set([currentYear, currentYear + 1, activeYear].filter(Boolean) as number[])).sort();
   const mandalIdentity = getMandalIdentity(mandal, session);
   const slipRows = slips;
+
+  useEffect(() => {
+    if (screen !== 'slips') return;
+    const hasFilters = Boolean(query.trim() || slipCreatorFilter || slipDateFilter || slipFilter !== 'all');
+    if (!hasFilters && !slipFilterStartedRef.current) return;
+    slipFilterStartedRef.current = true;
+    const timer = window.setTimeout(() => {
+      void onFilterSlips({
+        createdByUserId: slipCreatorFilter || undefined,
+        date: slipDateFilter || undefined,
+        search: query.trim() || undefined,
+        status: slipFilter === 'paid' ? 'ACTIVE' : slipFilter === 'pending' ? 'PENDING' : undefined,
+      });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [onFilterSlips, query, screen, slipCreatorFilter, slipDateFilter, slipFilter]);
+
   const memberUserId = getMemberUserId;
   const {
     entriesByPhone,
@@ -2580,9 +2821,14 @@ function AdhyakshApp({
       totalSlipCollection: paidTotal,
     };
   }, [expenses, groups, members, slipRows]);
+  const totalSlipCount = Number(workspaceMetrics.slipTotalCount ?? slipMeta.total ?? slipRows.length);
+  const paidSlipCount = Number(workspaceMetrics.slipPaidCount ?? paidSlipRows.length);
+  const pendingSlipCount = Number(workspaceMetrics.slipPendingCount ?? pendingSlipRows.length);
+  const paidSlipAmount = Number(workspaceMetrics.slipPaidAmount ?? totalSlipCollection);
+  const totalPendingSlipAmount = Number(workspaceMetrics.slipPendingAmount ?? pendingSlipAmount);
   const filteredSlipRows = useMemo(() => {
     const source = slipFilter === 'paid' ? paidSlipRows : slipFilter === 'pending' ? pendingSlipRows : slipRows;
-    const normalizedQuery = query.trim().toLowerCase();
+    const normalizedQuery = deferredQuery.trim().toLowerCase();
     return source.filter((slip) => {
       if (slipCreatorFilter && slip.collectedByUserId !== slipCreatorFilter) return false;
       if (slipDateFilter && slip.createdAt.slice(0, 10) !== slipDateFilter) return false;
@@ -2590,8 +2836,8 @@ function AdhyakshApp({
       const haystack = `${slip.slipNumber} ${slip.contributorName} ${slip.shopName ?? ''} ${slip.areaName ?? ''} ${slip.collector?.name ?? ''} ${slip.createdAt.slice(0, 10)}`;
       return haystack.toLowerCase().includes(normalizedQuery);
     });
-  }, [paidSlipRows, pendingSlipRows, query, slipCreatorFilter, slipDateFilter, slipFilter, slipRows]);
-  const balance = totalSlipCollection + memberVargani - expensesTotal;
+  }, [deferredQuery, paidSlipRows, pendingSlipRows, slipCreatorFilter, slipDateFilter, slipFilter, slipRows]);
+  const balance = Number(workspaceMetrics.balance ?? (totalSlipCollection + memberVargani - expensesTotal));
   const isInitialSync = workspaceRefreshing && !workspaceLoaded;
   const displayNotice = localNotice || (notice && /error|failed|expired|could not|logged out|unauthorized/i.test(notice) ? notice : '');
   const metricValue = (value: string) => (workspaceLoaded ? value : '--');
@@ -2754,8 +3000,15 @@ function AdhyakshApp({
           <div className="adhyaksh-header-actions">
             <button disabled={busy || workspaceRefreshing} onClick={onRefresh} type="button"><RefreshCw size={17} className={workspaceRefreshing ? 'spin-icon' : ''} />{workspaceRefreshing ? 'Syncing' : 'Refresh'}</button>
             <label className="year-select">
-              <span>Active Year</span>
-              <select defaultValue="2026"><option>Year 2026</option><option>Year 2027</option></select>
+              <span>{yearChanging ? 'Switching...' : 'Active Year'}</span>
+              <select
+                aria-label="Active year"
+                disabled={busy || workspaceRefreshing || yearChanging}
+                onChange={(event) => void onYearChange(Number(event.currentTarget.value))}
+                value={activeYear ?? currentYear}
+              >
+                {yearOptions.map((year) => <option key={year} value={year}>Year {year}</option>)}
+              </select>
             </label>
             <div className="top-user mini">
               <span>{session.user.name.charAt(0)}</span>
@@ -2780,7 +3033,7 @@ function AdhyakshApp({
             <div className="metric-strip six">
               <Metric label="Total Members" value={metricValue(String(memberRows.length))} />
               <Metric green label="Member Vargani" note={metricNote(`${memberPaidCount} Members Paid`)} value={metricValue(money(memberVargani))} />
-              <Metric green label="Slip Vargani" note={metricNote(`${slipRows.length} Slips Paid`)} value={metricValue(money(totalSlipCollection))} />
+              <Metric green label="Slip Vargani" note={metricNote(`${paidSlipCount} Slips Paid`)} value={metricValue(money(paidSlipAmount))} />
               <Metric red label="Pending (Members)" note={metricNote(`${memberPendingCount} Pending`)} value={metricValue(money(pendingMemberVargani))} />
               <Metric blue label="Mandal Expenses" note={metricNote('Paid by Mandal')} value={metricValue(money(expensesTotal))} />
               <Metric blue label="Remaining Balance" note={metricNote('Available Funds')} value={metricValue(money(balance))} />
@@ -2949,15 +3202,15 @@ function AdhyakshApp({
               </div>
             </div>
             <div className="metric-strip five-cols">
-              <Metric label="Total Entries" note={metricNote(mandal?.slipLimit ? `Plan limit: ${mandal.slipLimit} slips` : 'Unlimited plan')} value={metricValue(String(slipRows.length))} />
-              <Metric green label="Collected" note={metricNote(`${paidSlipRows.length} Paid`)} value={metricValue(money(totalSlipCollection))} />
-              <Metric red label="Pending" note={metricNote(`${pendingSlipRows.length} Pending`)} value={metricValue(money(pendingSlipAmount))} />
-              <Metric green label="Paid Slips" value={metricValue(String(paidSlipRows.length))} />
-              <Metric blue label="Pending Slips" value={metricValue(String(pendingSlipRows.length))} />
+              <Metric label="Total Entries" note={metricNote(mandal?.slipLimit ? `Plan limit: ${mandal.slipLimit} slips` : 'Unlimited plan')} value={metricValue(String(totalSlipCount))} />
+              <Metric green label="Collected" note={metricNote(`${paidSlipCount} Paid`)} value={metricValue(money(paidSlipAmount))} />
+              <Metric red label="Pending" note={metricNote(`${pendingSlipCount} Pending`)} value={metricValue(money(totalPendingSlipAmount))} />
+              <Metric green label="Paid Slips" value={metricValue(String(paidSlipCount))} />
+              <Metric blue label="Pending Slips" value={metricValue(String(pendingSlipCount))} />
             </div>
             <div className="slip-insights">
               <div className="insight-card warning">
-                <strong>Pending Location-wise ({money(pendingSlipAmount)})</strong>
+                <strong>Pending Location-wise ({money(totalPendingSlipAmount)})</strong>
                 <div className="chips">
                   {pendingSlipRows.length === 0 ? <span>No pending slips</span> : pendingSlipRows.map((slip) => (
                     <span key={`${slip.id}-pending`}>{slip.areaName || 'No area'} {money(Number(slip.amount || 0))}</span>
@@ -2966,14 +3219,14 @@ function AdhyakshApp({
               </div>
               <div className="insight-card blue">
                 <strong>Slips Generated</strong>
-                <div className="chips">{slipRows.length === 0 ? <span>No slips generated</span> : <span>{slipRows.length} Live Slips</span>}</div>
+                <div className="chips">{totalSlipCount === 0 ? <span>No slips generated</span> : <span>{totalSlipCount} Live Slips</span>}</div>
               </div>
             </div>
             <div className="table-toolbar">
               <div className="segmented">
-                <button className={slipFilter === 'all' ? 'active' : ''} onClick={() => setSlipFilter('all')} type="button">All ({slipRows.length})</button>
-                <button className={slipFilter === 'paid' ? 'active' : ''} onClick={() => setSlipFilter('paid')} type="button">Paid ({paidSlipRows.length})</button>
-                <button className={slipFilter === 'pending' ? 'active' : ''} onClick={() => setSlipFilter('pending')} type="button">Pending ({pendingSlipRows.length})</button>
+                <button className={slipFilter === 'all' ? 'active' : ''} onClick={() => setSlipFilter('all')} type="button">All ({totalSlipCount})</button>
+                <button className={slipFilter === 'paid' ? 'active' : ''} onClick={() => setSlipFilter('paid')} type="button">Paid ({paidSlipCount})</button>
+                <button className={slipFilter === 'pending' ? 'active' : ''} onClick={() => setSlipFilter('pending')} type="button">Pending ({pendingSlipCount})</button>
               </div>
               <label className="slip-filter-control">
                 <span>Created by</span>
@@ -2994,7 +3247,7 @@ function AdhyakshApp({
               {workspaceLoaded && filteredSlipRows.length === 0 && <EmptyTableState message="No slips found for this filter." />}
               {filteredSlipRows.map((slip) => (
                 <div className="ops-row six" key={slip.id}>
-                  <b>{slip.slipNumber}</b><strong>{slip.contributorName}<small>{slip.shopName ?? '-'}</small></strong><b>{money(Number(slip.amount))}</b><span>{slip.contributorPhone ?? '-'}</span>
+                  <b>{slip.slipNumber}</b><strong>{slip.contributorName}<small>{slip.shopName ?? '-'}</small><small className="slip-address">{slip.contributorAddress || 'Address not added'}</small></strong><b>{money(Number(slip.amount))}</b><span>{slip.contributorPhone ?? '-'}</span>
                   <span><i className={isSlipPaid(slip) ? 'pill paid' : 'pill pending'}>{isSlipPaid(slip) ? 'Paid' : 'Pending'}</i><i className="pill mode">{slip.paymentMode}</i></span>
                   <span>{new Date(slip.createdAt).toLocaleDateString('en-IN')}<small>Created by {slip.collector?.name || 'Unknown user'}</small></span>
                   <span className="row-actions">
@@ -3005,6 +3258,13 @@ function AdhyakshApp({
                   </span>
                 </div>
               ))}
+              {slipMeta.page < slipMeta.totalPages && (
+                <div className="table-load-more">
+                  <button disabled={loadingMoreSlips} onClick={() => void onLoadMoreSlips()} type="button">
+                    {loadingMoreSlips ? 'Loading entries...' : `Load more (${slipRows.length} of ${slipMeta.total})`}
+                  </button>
+                </div>
+              )}
             </div>
           </section>
         )}
@@ -3032,7 +3292,7 @@ function AdhyakshApp({
               <Metric label="Total Users" value={String(userRows.length)} />
               <Metric blue label="Admins" value={String(userRows.filter((user) => user.role.includes('ADMIN')).length)} />
               <Metric blue label="Members" value={String(userRows.filter((user) => !user.role.includes('ADMIN')).length)} />
-              <Metric green label="Total Entries" value={String(slipRows.length)} />
+              <Metric green label="Total Entries" value={String(totalSlipCount)} />
             </div>
             <div className="ops-table users-table">
               <div className="ops-head five"><span>User</span><span>Email</span><span>Role</span><span>Entries</span><span>Actions</span></div>
@@ -3092,6 +3352,7 @@ function AdhyakshApp({
               entryStatus={entryStatus}
               groups={groups}
               onEntryStatusChange={setEntryStatus}
+              session={session}
             />
             {(activeForm?.customFields ?? []).map((field) => <CustomFieldInput field={field} key={field.id} />)}
             <div className="modal-actions"><button disabled={modalSubmitting === 'entry'} type="button" onClick={() => setEntryOpen(false)}>Cancel</button><button className={entryStatus === 'PENDING' ? 'pending-action' : 'success'} disabled={modalSubmitting === 'entry'} onClick={(event) => { if (event.currentTarget.form?.checkValidity()) onPrepareWhatsApp(entryStatus); }} type="submit">{entryStatus === 'PENDING' ? <Clock size={18} /> : <CheckCircle2 size={18} />}{modalSubmitting === 'entry' ? 'Saving...' : entryStatus === 'PENDING' ? 'Save as Pending' : 'Confirm & Generate Slip'}</button></div>
@@ -3285,11 +3546,13 @@ function EntryCoreFields({
   entryStatus,
   groups = [],
   onEntryStatusChange,
+  session,
 }: {
   entryFields: EntryFieldConfig[];
   entryStatus: 'ACTIVE' | 'PENDING';
   groups?: Group[];
   onEntryStatusChange: (status: 'ACTIVE' | 'PENDING') => void;
+  session: AuthSession;
 }) {
   const field = (key: EntryFieldKey) =>
     entryFields.find((item) => item.key === key) ?? DEFAULT_ENTRY_FIELDS.find((item) => item.key === key)!;
@@ -3301,6 +3564,7 @@ function EntryCoreFields({
       <ContributorNameFields
         marathiField={field('contributorNameMr')}
         nameField={field('contributorName')}
+        session={session}
       />
       {visible('shopName') && <label>{label('shopName')}<input name="shopName" required={field('shopName').required} placeholder="Enter shop / business name" /></label>}
       {visible('amount') && <label>{label('amount')}<input inputMode="numeric" name="amount" required={field('amount').required} placeholder="1500" /></label>}
@@ -3316,7 +3580,11 @@ function EntryCoreFields({
           </select>
         </label>
       )}
-      {visible('contributorAddress') && <label>{label('contributorAddress')}<textarea name="contributorAddress" required={field('contributorAddress').required} placeholder="Full address optional" /></label>}
+      <ContributorAddressFields
+        addressField={field('contributorAddress')}
+        marathiField={field('contributorAddressMr')}
+        session={session}
+      />
       {visible('contributorPhone') && <label>{label('contributorPhone')}<input name="contributorPhone" required={field('contributorPhone').required} placeholder="10 digit WhatsApp number" /></label>}
       {visible('paymentStatus') ? (
         <PaymentStatusSelector value={entryStatus} onChange={onEntryStatusChange} />
@@ -3346,15 +3614,31 @@ function EntryCoreFields({
 function ContributorNameFields({
   marathiField = DEFAULT_ENTRY_FIELDS[1],
   nameField = DEFAULT_ENTRY_FIELDS[0],
+  session,
 }: {
   marathiField?: EntryFieldConfig;
   nameField?: EntryFieldConfig;
+  session: AuthSession;
 }) {
   const [name, setName] = useState('');
   const [marathiName, setMarathiName] = useState('');
   const [manualMarathi, setManualMarathi] = useState(false);
 
   const autoMarathiName = useMemo(() => transliterateReceiptTextToMarathi(name).trim(), [name]);
+
+  useEffect(() => {
+    if (manualMarathi || !name.trim()) return;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      void requestAzureMarathiTransliteration(name, session, controller.signal)
+        .then((suggestion) => setMarathiName(suggestion))
+        .catch(() => undefined);
+    }, 450);
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [manualMarathi, name, session]);
 
   function updateName(nextName: string) {
     setName(nextName);
@@ -3372,6 +3656,77 @@ function ContributorNameFields({
     <>
       {nameField.visible && <label>{nameField.label}{nameField.required ? ' *' : ''}<input name="contributorName" onChange={(event) => updateName(event.currentTarget.value)} required={nameField.required} placeholder="Enter full name" value={name} /></label>}
       {marathiField.visible && <label>{marathiField.label}{marathiField.required ? ' *' : ''}<input name="contributorNameMr" onChange={(event) => updateMarathiName(event.currentTarget.value)} required={marathiField.required} placeholder="Auto Marathi name" value={marathiName} /></label>}
+    </>
+  );
+}
+
+function ContributorAddressFields({
+  addressField = DEFAULT_ENTRY_FIELDS.find((field) => field.key === 'contributorAddress')!,
+  marathiField = DEFAULT_ENTRY_FIELDS.find((field) => field.key === 'contributorAddressMr')!,
+  session,
+}: {
+  addressField?: EntryFieldConfig;
+  marathiField?: EntryFieldConfig;
+  session: AuthSession;
+}) {
+  const [address, setAddress] = useState('');
+  const [marathiAddress, setMarathiAddress] = useState('');
+  const [manualMarathi, setManualMarathi] = useState(false);
+
+  const autoMarathiAddress = useMemo(() => transliterateReceiptTextToMarathi(address).trim(), [address]);
+
+  useEffect(() => {
+    if (manualMarathi || !address.trim()) return;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      void requestAzureMarathiTransliteration(address, session, controller.signal)
+        .then((suggestion) => setMarathiAddress(suggestion))
+        .catch(() => undefined);
+    }, 450);
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [address, manualMarathi, session]);
+
+  function updateAddress(nextAddress: string) {
+    setAddress(nextAddress);
+    if (!manualMarathi) setMarathiAddress(transliterateReceiptTextToMarathi(nextAddress).trim());
+  }
+
+  function updateMarathiAddress(nextAddress: string) {
+    setMarathiAddress(nextAddress);
+    setManualMarathi(Boolean(nextAddress.trim()) && nextAddress.trim() !== autoMarathiAddress);
+  }
+
+  return (
+    <>
+      {addressField.visible && (
+        <label>
+          {addressField.label}{addressField.required ? ' *' : ''}
+          <textarea
+            name="contributorAddress"
+            onChange={(event) => updateAddress(event.currentTarget.value)}
+            placeholder="Full address optional"
+            required={addressField.required}
+            value={address}
+          />
+        </label>
+      )}
+      {marathiField.visible && (
+        <label>
+          {marathiField.label}{marathiField.required ? ' *' : ''}
+          <textarea
+            lang="mr"
+            name="contributorAddressMr"
+            onChange={(event) => updateMarathiAddress(event.currentTarget.value)}
+            placeholder="Auto-filled; review Marathi spelling"
+            required={marathiField.required}
+            value={marathiAddress}
+          />
+          <small>Review names, buildings and localities before generating the slip.</small>
+        </label>
+      )}
     </>
   );
 }
@@ -3658,10 +4013,16 @@ function SuperAdminApp({
   const [addMandalOpen, setAddMandalOpen] = useState(false);
   const [managedIndex, setManagedIndex] = useState<number | null>(null);
   const [ownerQuery, setOwnerQuery] = useState('');
+  const deferredOwnerQuery = useDeferredValue(ownerQuery);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginMessage, setLoginMessage] = useState('');
   const [editingLogin, setEditingLogin] = useState<MandalLoginUser | null>(null);
   const [mandalEditBusy, setMandalEditBusy] = useState(false);
+  const [authkeyTemplates, setAuthkeyTemplates] = useState<AuthkeyWhatsAppTemplate[]>([]);
+  const [authkeyTemplatesError, setAuthkeyTemplatesError] = useState('');
+  const [authkeyTemplatesLoading, setAuthkeyTemplatesLoading] = useState(false);
+  const [authkeyDefaultTemplateWid, setAuthkeyDefaultTemplateWid] = useState<string | null>(null);
+  const [whatsappTemplateWid, setWhatsappTemplateWid] = useState('');
   const [mandalLogins, setMandalLogins] = useState<Record<string, Array<{ name?: string; password: string; role: string; userId?: string; username: string }>>>({});
   const [ownerTemplateDrafts, setOwnerTemplateDrafts] = useState<Record<string, string>>({});
   const selectedMandal = mandals[Math.min(selectedIndex, mandals.length - 1)];
@@ -3671,6 +4032,8 @@ function SuperAdminApp({
   const selectedTemplatePreview = resolveTemplateAssetUrl(
     (selectedKey && ownerTemplateDrafts[selectedKey]) || selectedTemplateVersion?.backgroundFileUrl || TEMPLATE_IMAGE,
   );
+  const selectedAuthkeyTemplate = authkeyTemplates.find((template) => template.wid === whatsappTemplateWid);
+  const defaultAuthkeyTemplate = authkeyTemplates.find((template) => template.wid === authkeyDefaultTemplateWid);
   const activeUsers = selectedMandal?.users?.filter((user) => user.status === 'ACTIVE') ?? [];
   const adminUser = activeUsers.find((user) => user.role === 'MANDAL_ADMIN');
   const persistedLogins =
@@ -3693,17 +4056,54 @@ function SuperAdminApp({
     ...extraLogins,
     ...persistedLogins.filter((login) => !extraLogins.some((extra) => extra.username === login.username)),
   ];
-  const totalMembers = mandals.reduce((sum, mandal) => sum + Number(mandal._count?.members ?? mandal.memberCount ?? 0), 0);
-  const totalSlipsGenerated = mandals.reduce((sum, mandal) => sum + Number(mandal._count?.slips ?? 0), 0);
-  const filteredMandals = mandals
-    .map((mandal, index) => ({ index, mandal }))
-    .filter(({ mandal }) => {
-      const query = ownerQuery.trim().toLowerCase();
-      if (!query) return true;
-      return [mandal.name, mandal.address, mandal.locality, mandal.city, mandal.contactEmail]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(query));
-    });
+  const { filteredMandals, totalMembers, totalSlipsGenerated } = useMemo(() => {
+    const normalizedQuery = deferredOwnerQuery.trim().toLowerCase();
+    return {
+      filteredMandals: mandals
+        .map((mandal, index) => ({ index, mandal }))
+        .filter(({ mandal }) => !normalizedQuery || [
+          mandal.name,
+          mandal.address,
+          mandal.locality,
+          mandal.city,
+          mandal.contactEmail,
+        ].filter(Boolean).some((value) => String(value).toLowerCase().includes(normalizedQuery))),
+      totalMembers: mandals.reduce(
+        (sum, mandal) => sum + Number(mandal._count?.members ?? mandal.memberCount ?? 0),
+        0,
+      ),
+      totalSlipsGenerated: mandals.reduce(
+        (sum, mandal) => sum + Number(mandal._count?.slips ?? 0),
+        0,
+      ),
+    };
+  }, [deferredOwnerQuery, mandals]);
+
+  const loadAuthkeyTemplates = useCallback(async (forceRefresh = false) => {
+    setAuthkeyTemplatesLoading(true);
+    setAuthkeyTemplatesError('');
+    try {
+      const catalog = await apiRequest<AuthkeyWhatsAppTemplateCatalog>(
+        `/mandals/whatsapp/templates${forceRefresh ? '?refresh=true' : ''}`,
+        {},
+        session,
+      );
+      setAuthkeyTemplates(catalog.items);
+      setAuthkeyDefaultTemplateWid(catalog.defaultWid);
+    } catch (error) {
+      setAuthkeyTemplatesError(error instanceof Error ? error.message : 'Could not load Authkey templates.');
+    } finally {
+      setAuthkeyTemplatesLoading(false);
+    }
+  }, [session]);
+
+  useEffect(() => {
+    void loadAuthkeyTemplates(false);
+  }, [loadAuthkeyTemplates]);
+
+  useEffect(() => {
+    setWhatsappTemplateWid(selectedMandal?.whatsappTemplateWid ?? '');
+  }, [selectedMandal?.id, selectedMandal?.whatsappTemplateWid]);
 
   function syncOwnerRoute() {
     const route = parseOwnerRoute();
@@ -3835,6 +4235,7 @@ function SuperAdminApp({
     const normalizedPhone = username.includes('@') ? '' : normalizeOptionalIndianPhone(username);
     if (!username.includes('@') && !normalizedPhone) {
       setLoginMessage('Enter a valid email or Indian mobile number.');
+      setFormFieldError(formElement, 'username', 'Enter a valid email or Indian mobile number.');
       return;
     }
     const nextLogin = {
@@ -3883,6 +4284,7 @@ function SuperAdminApp({
       setLoginMessage('Login created. Copy it before leaving this screen.');
     } catch (error) {
       setLoginMessage(error instanceof Error ? error.message : 'Could not create login.');
+      focusFormErrorFromMessage(formElement, error);
     } finally {
       setLoginBusy(false);
     }
@@ -3891,11 +4293,13 @@ function SuperAdminApp({
   async function saveMandalDetails(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedMandal?.id) return;
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const rawPhone = String(form.get('contactPhone') || '').trim();
     const contactPhone = normalizeOptionalIndianPhone(rawPhone);
     if (rawPhone && !contactPhone) {
       setLoginMessage('Enter a valid 10-digit Indian contact number.');
+      setFormFieldError(formElement, 'contactPhone', 'Enter a valid 10-digit Indian contact number.');
       return;
     }
     const logo = form.get('logo');
@@ -3917,10 +4321,12 @@ function SuperAdminApp({
         slipLimit: Number(form.get('slipLimit') || 0) || null,
         state: String(form.get('state') || '').trim() || null,
         whatsappMode: String(form.get('whatsappMode') || 'AUTO_API'),
+        whatsappTemplateWid: whatsappTemplateWid || null,
       });
       setLoginMessage(updated ? 'Mandal profile saved.' : 'Could not save Mandal profile.');
     } catch (error) {
       setLoginMessage(error instanceof Error ? error.message : 'Could not save Mandal profile.');
+      focusFormErrorFromMessage(formElement, error);
     } finally {
       setMandalEditBusy(false);
     }
@@ -3929,21 +4335,25 @@ function SuperAdminApp({
   async function saveEditedLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedMandal?.id || !editingLogin) return;
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const email = String(form.get('email') || '').trim().toLowerCase();
     const rawPhone = String(form.get('phone') || '').trim();
     const phone = normalizeOptionalIndianPhone(rawPhone);
     const password = String(form.get('password') || '');
     if (!email && !phone) {
       setLoginMessage('Enter an email username or mobile number.');
+      setFormFieldError(formElement, email ? 'phone' : 'email', 'Enter an email username or mobile number.');
       return;
     }
     if (rawPhone && !phone) {
       setLoginMessage('Enter a valid 10-digit Indian mobile number.');
+      setFormFieldError(formElement, 'phone', 'Enter a valid 10-digit Indian mobile number.');
       return;
     }
     if (password && password.length < 8) {
       setLoginMessage('New password must contain at least 8 characters.');
+      setFormFieldError(formElement, 'password', 'New password must contain at least 8 characters.');
       return;
     }
 
@@ -4093,7 +4503,7 @@ function SuperAdminApp({
                 <label>WhatsApp Delivery<select defaultValue="AUTO_API" name="whatsappMode"><option value="AUTO_API">Automatic — Paid API</option><option value="MANUAL_SHARE">Manual — Open WhatsApp App</option></select></label>
                 <label>Adhyaksh Name<input name="adhyakshName" placeholder="Main admin name" /></label>
                 <label>Adhyaksh Email *<input name="adminEmail" required placeholder="admin@mandal.local" /></label>
-                <label className="full">Adhyaksh Password *<input name="adminPassword" required type="password" placeholder="Minimum 12 characters" /></label>
+                <label className="full">Adhyaksh Password *<input autoComplete="new-password" minLength={12} name="adminPassword" required type="password" placeholder="Minimum 12 characters" /></label>
                 <label className="full">Mandal Logo<input accept="image/*" name="logo" type="file" /></label>
                 <button className="primary full" disabled={busy} type="submit"><Plus size={18} />{busy ? 'Creating Mandal...' : t(language, 'Add Mandal')}</button>
               </form>
@@ -4146,6 +4556,46 @@ function SuperAdminApp({
                     <label>Plan<select defaultValue={selectedMandal.plan ?? 'starter'} name="plan"><option value="starter">Starter</option><option value="standard">Standard</option><option value="premium">Premium</option></select></label>
                     <label>Slip Generation Limit<input defaultValue={selectedMandal.slipLimit ?? ''} inputMode="numeric" min={1} name="slipLimit" placeholder="Unlimited when blank" type="number" /></label>
                     <label>WhatsApp Delivery<select defaultValue={selectedMandal.whatsappMode ?? 'AUTO_API'} name="whatsappMode"><option value="AUTO_API">Automatic — Paid API</option><option value="MANUAL_SHARE">Manual — Open WhatsApp App</option></select></label>
+                    <div className="full whatsapp-template-setting">
+                      <label>
+                        Authkey Receipt Template
+                        <select
+                          disabled={authkeyTemplatesLoading}
+                          name="whatsappTemplateWid"
+                          onChange={(event) => setWhatsappTemplateWid(event.target.value)}
+                          value={whatsappTemplateWid}
+                        >
+                          <option value="">
+                            Live default: {defaultAuthkeyTemplate?.name ?? 'configured template'}
+                            {authkeyDefaultTemplateWid ? ` · WID ${authkeyDefaultTemplateWid}` : ''}
+                          </option>
+                          {authkeyTemplates.map((template) => (
+                            <option
+                              disabled={!template.approved || !template.compatible}
+                              key={template.wid}
+                              value={template.wid}
+                            >
+                              {template.name} · {template.language.toUpperCase()} · WID {template.wid}
+                              {!template.approved ? ' · Pending' : !template.compatible ? ' · Unsupported variables' : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button
+                        className="ghost-button"
+                        disabled={authkeyTemplatesLoading}
+                        onClick={() => void loadAuthkeyTemplates(true)}
+                        type="button"
+                      >
+                        <RefreshCw className={authkeyTemplatesLoading ? 'spin-icon' : ''} size={17} />
+                        {authkeyTemplatesLoading ? 'Syncing...' : 'Sync Authkey'}
+                      </button>
+                      <span className={authkeyTemplatesError ? 'template-sync-error' : 'template-sync-help'}>
+                        {authkeyTemplatesError || (selectedAuthkeyTemplate
+                          ? `${selectedAuthkeyTemplate.category} · ${selectedAuthkeyTemplate.variableCount} mapped variable${selectedAuthkeyTemplate.variableCount === 1 ? '' : 's'} · Approved`
+                          : 'The current live default applies to this mandal until a specific approved template is selected.')}
+                      </span>
+                    </div>
                     <label>Contact / Adhyaksh Name<input defaultValue={selectedMandal.contactName ?? selectedMandal.adhyakshName ?? ''} name="contactName" /></label>
                     <label>Contact Number<input defaultValue={selectedMandal.contactPhone ?? ''} inputMode="tel" name="contactPhone" placeholder="10-digit mobile number" /></label>
                     <label className="full">Replace Mandal Logo<input accept="image/*" name="logo" type="file" /></label>
@@ -4288,6 +4738,7 @@ function MandalCardGrid({
             <span>{mandal.contactPhone || 'Phone pending'}</span>
             <span>{mandal.slipLimit ? `${mandal.slipLimit} slip limit` : 'Unlimited slips'}</span>
             <span>{mandal.whatsappMode === 'MANUAL_SHARE' ? 'Manual WhatsApp' : 'Paid WhatsApp API'}</span>
+            <span>{mandal.whatsappTemplateName ? `WhatsApp: ${mandal.whatsappTemplateName}` : 'Default WhatsApp template'}</span>
             <em>Template Ready</em>
           </div>
           <div className="mandal-card-actions">
@@ -4382,7 +4833,9 @@ function MemberCollectorApp({
   modalOpen,
   notice,
   onDownloadSlip,
+  onFilterSlips,
   onGenerate,
+  onLoadMoreSlips,
   onLogout,
   onModalChange,
   onPrepareWhatsApp,
@@ -4390,8 +4843,11 @@ function MemberCollectorApp({
   onTaskDone,
   session,
   setSelectedSlip,
+  slipMeta,
   slips,
   tasks,
+  workspaceMetrics,
+  loadingMoreSlips,
 }: {
   activeForm: ActiveForm | null;
   busy: boolean;
@@ -4400,7 +4856,9 @@ function MemberCollectorApp({
   modalOpen: boolean;
   notice: string;
   onDownloadSlip: (slip: Slip) => Promise<void>;
+  onFilterSlips: (filters: SlipListFilters) => Promise<void> | void;
   onGenerate: (event: FormEvent<HTMLFormElement>) => Promise<boolean | void> | boolean | void;
+  onLoadMoreSlips: () => Promise<void> | void;
   onLogout: () => void;
   onModalChange: (open: boolean) => void;
   onPrepareWhatsApp: (paymentStatus: 'ACTIVE' | 'PENDING') => void;
@@ -4408,14 +4866,19 @@ function MemberCollectorApp({
   onTaskDone: (task: FestivalTask) => Promise<void> | void;
   session: AuthSession;
   setSelectedSlip: (slip: Slip) => void;
+  slipMeta: SlipPageMeta;
   slips: Slip[];
   tasks: FestivalTask[];
+  workspaceMetrics: MandalMetrics;
+  loadingMoreSlips: boolean;
 }) {
   const [entryStatus, setEntryStatus] = useState<'ACTIVE' | 'PENDING'>('ACTIVE');
   const [activeSection, setActiveSection] = useState<'slips' | 'tasks'>('slips');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [slipFilter, setSlipFilter] = useState<'all' | 'paid' | 'pending'>('all');
   const [slipQuery, setSlipQuery] = useState('');
+  const deferredSlipQuery = useDeferredValue(slipQuery);
+  const slipFilterStartedRef = useRef(false);
   const mandalIdentity = getMandalIdentity(mandal, session);
 
   useEffect(() => {
@@ -4428,7 +4891,7 @@ function MemberCollectorApp({
     const paid = slips.filter(isSlipPaid);
     const pending = slips.filter((slip) => !isSlipPaid(slip));
     const source = slipFilter === 'paid' ? paid : slipFilter === 'pending' ? pending : slips;
-    const normalizedQuery = slipQuery.trim().toLowerCase();
+    const normalizedQuery = deferredSlipQuery.trim().toLowerCase();
     const filtered = normalizedQuery
       ? source.filter((slip) =>
           [slip.slipNumber, slip.contributorName, slip.shopName, slip.areaName, slip.contributorPhone]
@@ -4443,8 +4906,25 @@ function MemberCollectorApp({
       paidSlipRows: paid,
       pendingSlipRows: pending,
     };
-  }, [slipFilter, slipQuery, slips]);
+  }, [deferredSlipQuery, slipFilter, slips]);
   const paidSlips = paidSlipRows.length;
+  const totalSlipCount = Number(workspaceMetrics.slipTotalCount ?? slipMeta.total ?? slips.length);
+  const paidSlipCount = Number(workspaceMetrics.slipPaidCount ?? paidSlips);
+  const pendingSlipCount = Number(workspaceMetrics.slipPendingCount ?? pendingSlipRows.length);
+  const collectedAmount = Number(workspaceMetrics.slipPaidAmount ?? collected);
+
+  useEffect(() => {
+    const hasFilters = Boolean(slipQuery.trim() || slipFilter !== 'all');
+    if (!hasFilters && !slipFilterStartedRef.current) return;
+    slipFilterStartedRef.current = true;
+    const timer = window.setTimeout(() => {
+      void onFilterSlips({
+        search: slipQuery.trim() || undefined,
+        status: slipFilter === 'paid' ? 'ACTIVE' : slipFilter === 'pending' ? 'PENDING' : undefined,
+      });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [onFilterSlips, slipFilter, slipQuery]);
   const openTasks = useMemo(
     () => tasks.filter((task) => task.status !== 'DONE' && task.status !== 'CANCELLED'),
     [tasks],
@@ -4523,8 +5003,10 @@ function MemberCollectorApp({
             <h1>{activeSection === 'tasks' ? 'Assigned Tasks' : 'Vargani Slips'}</h1>
             <p>{activeForm?.festival.name ?? 'Active Festival'} · {roleLabel}</p>
           </div>
-          <select defaultValue="2026" aria-label="Active year">
-            <option value="2026">Year 2026</option>
+          <select aria-label="Active year" disabled value={festivalYear(activeForm?.festival) ?? new Date().getFullYear()}>
+            <option value={festivalYear(activeForm?.festival) ?? new Date().getFullYear()}>
+              Year {festivalYear(activeForm?.festival) ?? new Date().getFullYear()}
+            </option>
           </select>
         </header>
 
@@ -4544,18 +5026,18 @@ function MemberCollectorApp({
             {(busy || notice) && <div className={`notice ${busy ? 'busy' : ''}`}>{busy ? 'Working...' : notice}</div>}
 
             <section className="member-stats">
-              <Stat icon={<ReceiptText />} label="Total Entries" note={mandal?.slipLimit ? `Mandal limit: ${mandal.slipLimit}` : 'Your slips'} value={String(slips.length)} />
-              <Stat icon={<BadgeIndianRupee />} label="Collected" note={`${paidSlips} paid`} value={money(collected)} />
-              <Stat icon={<CheckCircle2 />} label="Paid Slips" note="Generated receipts" value={String(paidSlips)} />
-              <Stat icon={<FileText />} label="Pending Slips" note="No slip until paid" value={String(pendingSlipRows.length)} />
+              <Stat icon={<ReceiptText />} label="Total Entries" note={mandal?.slipLimit ? `Mandal limit: ${mandal.slipLimit}` : 'Your slips'} value={String(totalSlipCount)} />
+              <Stat icon={<BadgeIndianRupee />} label="Collected" note={`${paidSlipCount} paid`} value={money(collectedAmount)} />
+              <Stat icon={<CheckCircle2 />} label="Paid Slips" note="Generated receipts" value={String(paidSlipCount)} />
+              <Stat icon={<FileText />} label="Pending Slips" note="No slip until paid" value={String(pendingSlipCount)} />
             </section>
 
             <section className="member-table-card">
               <div className="table-toolbar">
                 <div className="tab-strip">
-                  <button className={slipFilter === 'all' ? 'active' : ''} onClick={() => setSlipFilter('all')} type="button">All ({slips.length})</button>
-                  <button className={slipFilter === 'paid' ? 'active' : ''} onClick={() => setSlipFilter('paid')} type="button">Paid ({paidSlips})</button>
-                  <button className={slipFilter === 'pending' ? 'active' : ''} onClick={() => setSlipFilter('pending')} type="button">Pending ({pendingSlipRows.length})</button>
+                  <button className={slipFilter === 'all' ? 'active' : ''} onClick={() => setSlipFilter('all')} type="button">All ({totalSlipCount})</button>
+                  <button className={slipFilter === 'paid' ? 'active' : ''} onClick={() => setSlipFilter('paid')} type="button">Paid ({paidSlipCount})</button>
+                  <button className={slipFilter === 'pending' ? 'active' : ''} onClick={() => setSlipFilter('pending')} type="button">Pending ({pendingSlipCount})</button>
                 </div>
                 <div className="search-box"><Search size={18} /><input onChange={(event) => setSlipQuery(event.target.value)} placeholder="Search by name, shop, location..." value={slipQuery} /></div>
               </div>
@@ -4607,6 +5089,13 @@ function MemberCollectorApp({
                   </div>
                 ))}
                 {filteredSlipRows.length === 0 && <div className="empty-state">No slips found for this filter.</div>}
+                {slipMeta.page < slipMeta.totalPages && (
+                  <div className="member-load-more">
+                    <button disabled={loadingMoreSlips} onClick={() => void onLoadMoreSlips()} type="button">
+                      {loadingMoreSlips ? 'Loading entries...' : `Load more (${slips.length} of ${slipMeta.total})`}
+                    </button>
+                  </div>
+                )}
               </div>
             </section>
           </>
@@ -4685,6 +5174,7 @@ function MemberCollectorApp({
               entryFields={entryFields}
               entryStatus={entryStatus}
               onEntryStatusChange={setEntryStatus}
+              session={session}
             />
             {(activeForm?.customFields ?? []).map((field) => <CustomFieldInput field={field} key={field.id} />)}
             <div className="modal-actions">
@@ -4899,6 +5389,7 @@ function LoginPanel({
               <span className="password-field">
                 <input
                   autoComplete="current-password"
+                  minLength={8}
                   name="password"
                   required
                   type={passwordVisible ? 'text' : 'password'}
@@ -4979,6 +5470,7 @@ const RECEIPT_MARATHI_TEXT_FIELDS = new Set([
   'building_name',
   'collectorName',
   'contributorAddress',
+  'contributorAddressMr',
   'contributorName',
   'contributorNameMr',
   'donorType',
@@ -5400,7 +5892,7 @@ const MARATHI_NUMBER_BELOW_HUNDRED = [
   'नव्याण्णव',
 ];
 
-function amountToMarathiWords(value: number | string) {
+export function amountToMarathiWords(value: number | string) {
   const amount = Math.floor(Number(value));
   if (!Number.isFinite(amount) || amount < 0) return '';
   return `${numberToMarathiWords(amount)} रुपये फक्त`;
@@ -5459,6 +5951,7 @@ function sampleFieldValue(key: string, label: string, placement?: Partial<Templa
     building_name: 'Sample Building',
     collectorName: 'Amit Collector',
     contributorAddress: 'Main Road, Pune',
+    contributorAddressMr: 'मुख्य रस्ता, पुणे',
     contributorName: 'Mahesh Traders',
     contributorNameMr: 'महेश ट्रेडर्स',
     contributorPhone: '9876543210',
@@ -5702,6 +6195,7 @@ function TemplateView({
       { key: 'contributorName', label: 'Name' },
       { key: 'contributorNameMr', label: 'Name in Marathi' },
       { key: 'contributorAddress', label: 'Address' },
+      { key: 'contributorAddressMr', label: 'Address in Marathi' },
       { key: 'amount', label: 'Amount' },
       { key: 'amountWords', label: 'Amount in Words' },
       { key: 'amountWordsMarathi', label: 'Amount in Words (Marathi)' },
@@ -5888,6 +6382,31 @@ function TemplateView({
     setHistoryVersion((value) => value + 1);
   }
 
+  function updatePlacementLive(fieldKey: string, partial: Partial<TemplatePlacement>) {
+    setPlacements((current) => {
+      if (current[fieldKey]?.locked) return current;
+      return {
+        ...current,
+        [fieldKey]: {
+          ...defaultPlacement(),
+          ...current[fieldKey],
+          ...partial,
+        },
+      };
+    });
+  }
+
+  function beginInteractionHistory() {
+    undoStackRef.current = [...undoStackRef.current.slice(-59), clonePlacementMap(placements)];
+    redoStackRef.current = [];
+  }
+
+  function finishInteraction() {
+    if (!interaction) return;
+    setInteraction(null);
+    setHistoryVersion((value) => value + 1);
+  }
+
   function undoPlacementChange() {
     const previous = undoStackRef.current.pop();
     if (!previous) return;
@@ -5948,7 +6467,7 @@ function TemplateView({
     const deltaY = point.y - interaction.startY;
     const origin = interaction.origin;
     if (interaction.type === 'move') {
-      updatePlacement(interaction.fieldKey, {
+      updatePlacementLive(interaction.fieldKey, {
         x: clamp(snapValue(origin.x + deltaX), 0, canvasWidth - origin.width),
         y: clamp(snapValue(origin.y + deltaY), 0, canvasHeight - origin.height),
       });
@@ -5975,7 +6494,7 @@ function TemplateView({
     nextY = clamp(nextY, 0, canvasHeight - nextHeight);
     const snappedX = clamp(snapValue(nextX), 0, canvasWidth - 48);
     const snappedY = clamp(snapValue(nextY), 0, canvasHeight - 24);
-    updatePlacement(interaction.fieldKey, {
+    updatePlacementLive(interaction.fieldKey, {
       height: clamp(snapValue(nextHeight), 24, canvasHeight - snappedY),
       width: clamp(snapValue(nextWidth), 48, canvasWidth - snappedX),
       x: snappedX,
@@ -5991,6 +6510,7 @@ function TemplateView({
     setActiveField(fieldKey);
     setContextMenu(null);
     if (placements[fieldKey]?.locked) return;
+    beginInteractionHistory();
     setInteraction({
       fieldKey,
       origin: placements[fieldKey] ?? defaultPlacement(),
@@ -6008,6 +6528,7 @@ function TemplateView({
     setActiveField(fieldKey);
     setContextMenu(null);
     if (placements[fieldKey]?.locked) return;
+    beginInteractionHistory();
     setInteraction({
       fieldKey,
       handle,
@@ -6232,8 +6753,8 @@ function TemplateView({
             ref={canvasRef}
             onPointerDown={placeActiveField}
             onPointerMove={handleCanvasPointerMove}
-            onPointerUp={() => setInteraction(null)}
-            onPointerCancel={() => setInteraction(null)}
+            onPointerUp={finishInteraction}
+            onPointerCancel={finishInteraction}
             onContextMenu={(event) => {
               event.preventDefault();
               setContextMenu(null);
@@ -6934,7 +7455,21 @@ function mapBackendMandal(
     status: mandal.status,
     users: (mandal.users ?? []).filter((user) => user.status === 'ACTIVE'),
     whatsappMode: mandal.whatsappMode ?? 'AUTO_API',
+    whatsappTemplateLanguage: mandal.whatsappTemplateLanguage ?? null,
+    whatsappTemplateName: mandal.whatsappTemplateName ?? null,
+    whatsappTemplateVariableCount: mandal.whatsappTemplateVariableCount ?? null,
+    whatsappTemplateWid: mandal.whatsappTemplateWid ?? null,
   };
+}
+
+function festivalYear(festival?: Festival | null) {
+  if (!festival) return null;
+  if (festival.startDate) {
+    const year = new Date(festival.startDate).getUTCFullYear();
+    if (Number.isFinite(year)) return year;
+  }
+  const match = festival.name.match(/\b(20\d{2})\b/);
+  return match ? Number(match[1]) : null;
 }
 
 function money(value: number) {
@@ -6986,15 +7521,6 @@ function fileToDataUrl(file: File) {
     reader.onerror = () => reject(new Error('Could not read selected file.'));
     reader.onload = () => resolve(String(reader.result || ''));
     reader.readAsDataURL(file);
-  });
-}
-
-function blobToDataUrl(blob: Blob) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('Could not read generated receipt image.'));
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.readAsDataURL(blob);
   });
 }
 
