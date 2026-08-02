@@ -44,7 +44,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, PointerEvent, ReactNode } from 'react';
-import { ApiError, apiDownload, apiRequest, prewarmApi, sessionForStorage } from './api/client';
+import { ApiError, ApiNetworkError, ApiTimeoutError, apiDownload, apiRequest, prewarmApi, sessionForStorage } from './api/client';
 import {
   focusFormErrorFromMessage,
   setFormFieldError,
@@ -1081,16 +1081,27 @@ export default function App() {
       return;
     }
 
+    const performLogin = () => apiRequest<AuthSession>('/auth/login', {
+      body: JSON.stringify({
+        identifier,
+        password,
+      }),
+      method: 'POST',
+      timeoutMs: 30_000,
+    });
+
     setNotice('');
     setLoginBusy(true);
     try {
-      const nextSession = await apiRequest<AuthSession>('/auth/login', {
-        body: JSON.stringify({
-          identifier,
-          password,
-        }),
-        method: 'POST',
-      });
+      let nextSession: AuthSession;
+      try {
+        nextSession = await performLogin();
+      } catch (error) {
+        if (!(error instanceof ApiTimeoutError)) throw error;
+        setNotice('Waking login service. Checking credentials again...');
+        await prewarmApi();
+        nextSession = await performLogin();
+      }
       window.localStorage.setItem(SESSION_KEY, JSON.stringify(sessionForStorage(nextSession)));
       setSession(nextSession);
       setWorkspaceLoaded(false);
@@ -1103,6 +1114,8 @@ export default function App() {
         setNotice('Too many login attempts. Please wait a minute and try again.');
       } else if (error instanceof ApiError && error.status >= 500) {
         setNotice('Login service is temporarily busy. Please try again shortly.');
+      } else if (error instanceof ApiTimeoutError || error instanceof ApiNetworkError) {
+        setNotice('Login service is waking up. Please try again in a few seconds.');
       } else {
         setNotice(error instanceof Error ? error.message : 'Could not log in. Please try again.');
       }

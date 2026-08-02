@@ -25,6 +25,20 @@ export class ApiError extends Error {
   }
 }
 
+export class ApiTimeoutError extends Error {
+  constructor() {
+    super('The login service is waking up. Please try again in a moment.');
+    this.name = 'ApiTimeoutError';
+  }
+}
+
+export class ApiNetworkError extends Error {
+  constructor() {
+    super('Could not reach the server. Check your connection and try again.');
+    this.name = 'ApiNetworkError';
+  }
+}
+
 export async function apiRequest<T>(
   path: string,
   options: ApiRequestOptions = {},
@@ -117,10 +131,10 @@ async function fetchWithAuth(path: string, options: ApiRequestOptions, session?:
     });
   } catch (error) {
     if (controller.signal.aborted && !options.signal?.aborted) {
-      throw new Error('The server took too long to respond. Please try again.');
+      throw new ApiTimeoutError();
     }
     if (error instanceof TypeError) {
-      throw new Error('Could not reach the server. Check your connection and try again.');
+      throw new ApiNetworkError();
     }
     throw error;
   } finally {
