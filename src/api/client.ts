@@ -31,7 +31,7 @@ export async function apiRequest<T>(
 ): Promise<T> {
   const response = await fetchWithAuth(path, options, session);
 
-  if (response.status === 401 && session?.refreshToken && path !== '/auth/refresh') {
+  if (response.status === 401 && session && path !== '/auth/refresh') {
     // A page can issue several API calls at once. If the access token expires,
     // refresh it once and let every failed request reuse the same result.
     const refreshed = await refreshSessionOnce(session);
@@ -58,7 +58,7 @@ export async function apiDownload(
 ): Promise<{ blob: Blob; fileName?: string }> {
   let response = await fetchWithAuth(path, { headers: { Accept: 'application/octet-stream' } }, session);
 
-  if (response.status === 401 && session?.refreshToken) {
+  if (response.status === 401 && session) {
     const refreshed = await refreshSessionOnce(session);
     if (refreshed) {
       response = await fetchWithAuth(path, { headers: { Accept: 'application/octet-stream' } }, session);
@@ -82,13 +82,17 @@ async function fetchWithAuth(path: string, options: ApiRequestOptions, session?:
   options.signal?.addEventListener('abort', abortFromCaller, { once: true });
   const headers = new Headers(options.headers);
   headers.set('Accept', 'application/json');
-  if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  if (!headers.has('x-request-id')) headers.set('x-request-id', createRequestId());
+  if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
   if (session?.accessToken) headers.set('Authorization', `Bearer ${session.accessToken}`);
 
   try {
     const { timeoutMs: _timeoutMs, ...requestOptions } = options;
     return await fetch(`${API_BASE_URL}${path}`, {
       ...requestOptions,
+      credentials: 'include',
       headers,
       signal: controller.signal,
     });
@@ -104,6 +108,12 @@ async function fetchWithAuth(path: string, options: ApiRequestOptions, session?:
     window.clearTimeout(timeout);
     options.signal?.removeEventListener('abort', abortFromCaller);
   }
+}
+
+function createRequestId() {
+  return typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 async function readResponse<T>(response: Response): Promise<T> {
@@ -136,14 +146,22 @@ async function refreshSession(session: ApiAuthSession) {
 
     const nextSession = await readResponse<ApiAuthSession>(response);
     session.accessToken = nextSession.accessToken;
-    session.refreshToken = nextSession.refreshToken;
+    session.refreshToken = undefined;
     session.user = nextSession.user;
-    window.localStorage.setItem(SESSION_KEY, JSON.stringify(nextSession));
+    window.localStorage.setItem(SESSION_KEY, JSON.stringify(sessionForStorage(nextSession)));
     return true;
   } catch {
     expireStoredSession();
     return false;
   }
+}
+
+export function sessionForStorage<T extends ApiAuthSession>(session: T): T {
+  return {
+    ...session,
+    accessToken: '',
+    refreshToken: undefined,
+  };
 }
 
 function expireStoredSession() {

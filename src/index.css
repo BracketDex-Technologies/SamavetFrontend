@@ -1,4 +1,5 @@
 :root {
+  --font-ui: "Inter Variable", "Noto Sans Devanagari Variable", Inter, "Segoe UI", sans-serif;
   --bg: #fffdd8;
   --panel: #ffffff;
   --panel-soft: #fff7ed;
@@ -17,9 +18,7 @@
   --orange-soft: #ffeadb;
   color: var(--ink);
   background: var(--bg);
-  font-family:
-    Inter, "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", sans-serif;
+  font-family: var(--font-ui);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -1639,6 +1638,41 @@ kbd {
   border-top: 3px solid var(--orange);
 }
 
+.whatsapp-template-setting {
+  align-items: end;
+  background: #fffaf5;
+  border: 1px solid #fed7aa;
+  border-radius: 16px;
+  display: grid;
+  gap: 10px 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 14px;
+}
+
+.whatsapp-template-setting > label {
+  min-width: 0;
+}
+
+.whatsapp-template-setting > button {
+  min-height: 48px;
+  white-space: nowrap;
+}
+
+.template-sync-help,
+.template-sync-error {
+  font-size: 13px;
+  grid-column: 1 / -1;
+  line-height: 1.45;
+}
+
+.template-sync-help {
+  color: #64748b;
+}
+
+.template-sync-error {
+  color: #dc2626;
+}
+
 .owner-login-edit-modal {
   max-width: 620px;
 }
@@ -2792,6 +2826,40 @@ button.pending-action {
 
 .ops-row {
   border-top: 1px solid #edf0f3;
+}
+
+.table-load-more {
+  border-top: 1px solid #edf0f3;
+  display: flex;
+  justify-content: center;
+  min-width: 920px;
+  padding: 18px;
+}
+
+.table-load-more button {
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 12px;
+  color: #c2410c;
+  font-weight: 800;
+  min-height: 44px;
+  padding: 0 22px;
+}
+
+.member-load-more {
+  display: flex;
+  justify-content: center;
+  padding: 18px;
+}
+
+.member-load-more button {
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 12px;
+  color: #c2410c;
+  font-weight: 800;
+  min-height: 44px;
+  padding: 0 22px;
 }
 
 .ops-row strong {
@@ -5794,6 +5862,15 @@ nav button.active svg,
     grid-template-columns: 1fr;
   }
 
+  .whatsapp-template-setting {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .whatsapp-template-setting > button {
+    width: 100%;
+  }
+
   .table-toolbar {
     gap: 10px;
   }
@@ -6364,6 +6441,61 @@ nav button.active svg,
   .template-action-row,
   .template-action-row.wide {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Unified form validation feedback */
+label.has-field-error {
+  color: #b91c1c !important;
+}
+
+input.form-error-target,
+select.form-error-target,
+textarea.form-error-target {
+  border-color: #ef4444 !important;
+  box-shadow: 0 0 0 4px rgb(239 68 68 / 16%) !important;
+  outline: none !important;
+  scroll-margin-block: 140px;
+}
+
+.form-field-error {
+  color: #dc2626;
+  display: block;
+  flex-basis: 100%;
+  font-size: 0.78rem;
+  font-weight: 750;
+  line-height: 1.35;
+  margin-top: 0.4rem;
+  width: 100%;
+}
+
+.form-error-pulse {
+  animation: form-error-shake-pulse 680ms ease-out 2;
+}
+
+@keyframes form-error-shake-pulse {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  18% {
+    box-shadow: 0 0 0 4px rgb(239 68 68 / 18%), 0 0 0 0 rgb(239 68 68 / 42%);
+    transform: translateX(-7px);
+  }
+  38% {
+    transform: translateX(6px);
+  }
+  58% {
+    box-shadow: 0 0 0 4px rgb(239 68 68 / 18%), 0 0 0 12px rgb(239 68 68 / 0%);
+    transform: translateX(-4px);
+  }
+  78% {
+    transform: translateX(3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .form-error-pulse {
+    animation: none;
   }
 }
 
@@ -9362,4 +9494,126 @@ nav button.active svg,
   .template-stage .toolbar {
     grid-template-columns: 1fr !important;
   }
+}
+
+/* Unified product typography
+   Keep the operational UI calm and readable like the Print ID Craft reference.
+   Receipt field typography remains controlled by each saved template. */
+:root {
+  --font-display: var(--font-ui);
+  --font-body: var(--font-ui);
+}
+
+html,
+body,
+#root,
+#root :where(button, input, select, textarea) {
+  font-family: var(--font-ui);
+  font-optical-sizing: auto;
+}
+
+body {
+  font-weight: 400;
+  letter-spacing: -0.006em;
+}
+
+#root :where(.shell, .member-shell, .auth-shell, .login-shell, .owner-shell) {
+  --font-display: var(--font-ui);
+  --font-body: var(--font-ui);
+  font-family: var(--font-ui);
+}
+
+#root h1,
+#root h2,
+#root h3,
+#root h4,
+#root h5,
+#root h6 {
+  font-family: var(--font-ui) !important;
+  font-style: normal;
+  letter-spacing: -0.025em;
+}
+
+#root h1 {
+  font-weight: 700 !important;
+}
+
+#root h2 {
+  font-weight: 650 !important;
+}
+
+#root :where(h3, h4, h5, h6) {
+  font-weight: 600 !important;
+}
+
+#root :where(p, small, dd) {
+  font-weight: 400 !important;
+}
+
+#root span {
+  font-weight: inherit !important;
+}
+
+#root :where(strong, b) {
+  font-weight: 600 !important;
+}
+
+#root :where(button, input, select, textarea) {
+  font-weight: 500 !important;
+  letter-spacing: -0.006em;
+}
+
+#root :where(label, legend, th, dt) {
+  font-weight: 550 !important;
+  letter-spacing: -0.008em;
+}
+
+#root :where(
+  .stat > strong,
+  .metric > strong,
+  .owner-stat-card > strong,
+  .summary-card > strong,
+  .member-stat strong,
+  .dashboard-stat strong
+) {
+  font-weight: 650 !important;
+  letter-spacing: -0.03em;
+}
+
+#root :where(
+  .stat > span,
+  .metric > span,
+  .owner-stat-card > span,
+  .summary-card > span,
+  .managed-fields-head,
+  .eyebrow
+) {
+  font-weight: 550 !important;
+  letter-spacing: 0.01em;
+}
+
+#root :where(
+  .chip,
+  .badge,
+  .status,
+  .status-chip,
+  .role-chip,
+  .payment-badge,
+  .chips span,
+  .nav-item,
+  .sidebar nav button,
+  .member-nav button
+) {
+  font-weight: 550 !important;
+}
+
+#root :where(.muted, .subtitle, .helper, .hint, .note) {
+  font-weight: 400 !important;
+}
+
+html:lang(mr),
+html:lang(hi),
+html:lang(mr) #root,
+html:lang(hi) #root {
+  font-family: "Noto Sans Devanagari Variable", "Inter Variable", sans-serif;
 }
