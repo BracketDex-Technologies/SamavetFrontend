@@ -44,7 +44,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, PointerEvent, ReactNode } from 'react';
-import { ApiError, apiDownload, apiRequest, sessionForStorage } from './api/client';
+import { ApiError, apiDownload, apiRequest, prewarmApi, sessionForStorage } from './api/client';
 import {
   focusFormErrorFromMessage,
   setFormFieldError,
@@ -1090,7 +1090,6 @@ export default function App() {
           password,
         }),
         method: 'POST',
-        timeoutMs: 12_000,
       });
       window.localStorage.setItem(SESSION_KEY, JSON.stringify(sessionForStorage(nextSession)));
       setSession(nextSession);
@@ -5271,6 +5270,10 @@ function LoginPanel({
   });
   const [passwordVisible, setPasswordVisible] = useState(false);
   const isOwner = loginType === 'owner';
+
+  useEffect(() => {
+    void prewarmApi();
+  }, []);
 
   function setLoginMode(type: 'owner' | 'mandal') {
     setLoginType(type);

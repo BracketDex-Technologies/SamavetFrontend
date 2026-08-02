@@ -8,6 +8,7 @@ export const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_UR
 const SESSION_KEY = 'digital-vargani-admin-session';
 const SESSION_EXPIRED_EVENT = 'digital-vargani-session-expired';
 const REQUEST_TIMEOUT_MS = 30_000;
+const PREWARM_TIMEOUT_MS = 5_000;
 let refreshInFlight: Promise<boolean> | null = null;
 
 export interface ApiRequestOptions extends RequestInit {
@@ -73,6 +74,24 @@ export async function apiDownload(
     blob: await response.blob(),
     fileName: readAttachmentFileName(response.headers.get('Content-Disposition')),
   };
+}
+
+export async function prewarmApi(): Promise<void> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), PREWARM_TIMEOUT_MS);
+
+  try {
+    await fetch(`${API_BASE_URL}/health/live`, {
+      cache: 'no-store',
+      credentials: 'include',
+      headers: { Accept: 'application/json', 'x-request-id': createRequestId() },
+      signal: controller.signal,
+    });
+  } catch {
+    // Login still performs the authoritative request; this only wakes cold infrastructure.
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }
 
 async function fetchWithAuth(path: string, options: ApiRequestOptions, session?: ApiAuthSession | null) {
