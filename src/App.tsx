@@ -82,6 +82,7 @@ type ThemedDialogRequest =
       message?: string;
       multiline?: boolean;
       placeholder?: string;
+      requiredValue?: string;
       resolve: (value: string | null) => void;
       title: string;
       type: 'prompt';
@@ -139,7 +140,7 @@ interface AuthSession {
   user: { id: string; mandalId: string | null; name: string; role: UserRole };
 }
 
-async function requestAzureMarathiTransliteration(
+async function requestMarathiTranslation(
   text: string,
   session: AuthSession,
   signal: AbortSignal,
@@ -1163,20 +1164,50 @@ export default function App() {
     if (workspaceSyncInFlightRef.current) return workspaceSyncInFlightRef.current;
     const sync = (async () => {
       try {
-        const summary = await apiRequest<{ kind: 'MANDAL' | 'OWNER'; metrics: Record<string, number> }>(
+        const summaryRequest = apiRequest<{ kind: 'MANDAL' | 'OWNER'; metrics: Record<string, number> }>(
           '/workspace/summary',
           {},
           currentSession,
         );
+        const detailsRequest = currentSession.user.mandalId && festivalId
+          ? refreshLiveCollections(currentSession, currentSession.user.mandalId, festivalId)
+          : Promise.resolve();
+        const [summary] = await Promise.all([summaryRequest, detailsRequest]);
         if (summary.kind === 'MANDAL') setWorkspaceMetrics(summary.metrics);
       } catch {
-        // Keep the optimistic UI. A manual refresh performs the full reconciliation.
+        // Keep optimistic state and retry on the next focus/poll cycle.
       }
     })().finally(() => {
       workspaceSyncInFlightRef.current = null;
     });
     workspaceSyncInFlightRef.current = sync;
     return sync;
+  }
+
+  async function refreshLiveCollections(currentSession: AuthSession, currentMandalId: string, currentFestivalId: string) {
+    const festivalPath = `/mandals/${currentMandalId}/festivals/${currentFestivalId}`;
+    const isCollectorSession = currentSession.user.role === 'MEMBER' || currentSession.user.role === 'GROUP_LEADER';
+    const shouldRefreshSlips = !Object.values(slipListFilters).some(Boolean);
+    const [latestSlips, liveTasks, liveExpenses] = await Promise.all([
+      shouldRefreshSlips
+        ? apiRequest<{ items: Slip[]; meta: SlipPageMeta }>('/vargani/slips?limit=25&page=1', {}, currentSession)
+        : Promise.resolve(null),
+      apiRequest<FestivalTask[]>(`${festivalPath}/tasks`, {}, currentSession),
+      isCollectorSession
+        ? Promise.resolve([])
+        : apiRequest<Expense[]>(`${festivalPath}/expenses`, {}, currentSession),
+    ]);
+
+    if (latestSlips) {
+      setSlips((current) => {
+        const latestIds = new Set(latestSlips.items.map((slip) => slip.id));
+        const retained = current.filter((slip) => !latestIds.has(slip.id));
+        return [...latestSlips.items, ...retained].slice(0, Math.max(25, current.length));
+      });
+      setSlipMeta(latestSlips.meta);
+    }
+    setTasks(liveTasks);
+    setExpenses(liveExpenses);
   }
 
   function scheduleWorkspaceSync(currentSession = session, delay = 750) {
@@ -1187,6 +1218,23 @@ export default function App() {
       void syncWorkspaceQuietly(currentSession);
     }, delay);
   }
+
+  useEffect(() => {
+    if (!session || !workspaceLoaded) return;
+    const refreshWhenActive = () => {
+      if (document.visibilityState === 'visible') void syncWorkspaceQuietly(session);
+    };
+    const timer = window.setInterval(refreshWhenActive, 30_000);
+    window.addEventListener('focus', refreshWhenActive);
+    document.addEventListener('visibilitychange', refreshWhenActive);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshWhenActive);
+      document.removeEventListener('visibilitychange', refreshWhenActive);
+    };
+    // The polling fallback is scoped to the authenticated workspace identity.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [festivalId, session, workspaceLoaded]);
 
   async function loadMoreSlips() {
     if (!session || loadingMoreSlips || slipMeta.page >= slipMeta.totalPages) return;
@@ -1867,32 +1915,56 @@ export default function App() {
     }
 
     const expensePayload = new FormData();
-    expensePayload.set('amount', String(Number(form.get('amount') || 0)));
-    expensePayload.set('expenseDate', String(form.get('date') || new Date().toISOString().slice(0, 10)));
+    const amount = Number(form.get('amount') || 0);
+    const expenseDate = String(form.get('date') || new Date().toISOString().slice(0, 10));
+    expensePayload.set('amount', String(amount));
+    expensePayload.set('expenseDate', expenseDate);
     expensePayload.set('status', 'APPROVED');
-    if (description || category) expensePayload.set('notes', category ? `${description}\nCategory: ${category}` : description);
+    const notes = category ? `${description}\nCategory: ${category}` : description;
+    if (description || category) expensePayload.set('notes', notes);
     const vendorName = String(form.get('vendor') || '').trim();
     if (vendorName) expensePayload.set('vendorName', vendorName);
     if (proofPhoto instanceof File && proofPhoto.size > 0) expensePayload.set('proofPhoto', proofPhoto);
 
-    try {
-      const expense = await apiRequest<Expense>(
-        `/mandals/${mandalId}/festivals/${festivalId}/expenses`,
-        {
-          body: expensePayload,
-          method: 'POST',
-        },
-        session,
-      );
-      setExpenses((current) => upsertById(current, expense));
-      formElement.reset();
-      setNotice(proofPhoto instanceof File && proofPhoto.size > 0 ? 'Expense and proof photo saved.' : 'Expense saved to backend.');
-      return true;
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not save expense.');
-      focusFormErrorFromMessage(formElement, error);
-      return false;
-    }
+    const optimisticId = `pending-expense-${crypto.randomUUID()}`;
+    const optimisticExpense: Expense = {
+      amount,
+      billFileUrl: null,
+      createdAt: new Date().toISOString(),
+      creator: { id: session.user.id, name: session.user.name },
+      expenseDate,
+      id: optimisticId,
+      notes: notes || null,
+      status: 'APPROVED',
+      vendorName: vendorName || null,
+    };
+    setExpenses((current) => upsertById(current, optimisticExpense));
+    setWorkspaceMetrics((current) => ({
+      ...current,
+      balance: Number(current.balance ?? 0) - amount,
+      totalExpenses: Number(current.totalExpenses ?? 0) + amount,
+    }));
+    formElement.reset();
+    setNotice(proofPhoto instanceof File && proofPhoto.size > 0 ? 'Expense added. Uploading proof photo…' : 'Expense added. Saving…');
+
+    void apiRequest<Expense>(
+      `/mandals/${mandalId}/festivals/${festivalId}/expenses`,
+      { body: expensePayload, method: 'POST' },
+      session,
+    ).then((expense) => {
+      setExpenses((current) => upsertById(current.filter((item) => item.id !== optimisticId), expense));
+      setNotice(proofPhoto instanceof File && proofPhoto.size > 0 ? 'Expense and proof photo saved.' : 'Expense saved.');
+      scheduleWorkspaceSync(session);
+    }).catch((error: unknown) => {
+      setExpenses((current) => current.filter((item) => item.id !== optimisticId));
+      setWorkspaceMetrics((current) => ({
+        ...current,
+        balance: Number(current.balance ?? 0) + amount,
+        totalExpenses: Math.max(0, Number(current.totalExpenses ?? 0) - amount),
+      }));
+      setNotice(error instanceof Error ? `Expense was not saved: ${error.message}` : 'Expense was not saved. Try again.');
+    });
+    return true;
   }
 
   async function updateExpense(expense: Expense) {
@@ -2275,29 +2347,32 @@ export default function App() {
     }
   }
 
-  async function cancelSlip(slip: Slip) {
+  async function deleteSlip(slip: Slip) {
     if (!session) return;
-    const confirmed = await askConfirm({
-      confirmLabel: 'Cancel Slip',
+    const confirmation = await askPrompt({
+      confirmLabel: 'Delete Slip',
       danger: true,
-      message: `${slip.slipNumber} for ${slip.contributorName} will be cancelled.`,
-      title: 'Cancel slip?',
+      message: `${slip.slipNumber} for ${slip.contributorName} will be permanently deleted. This cannot be undone. Type DELETE to confirm.`,
+      placeholder: 'Type DELETE',
+      requiredValue: 'DELETE',
+      title: 'Permanently delete slip?',
     });
-    if (!confirmed) return;
+    if (confirmation !== 'DELETE') {
+      if (confirmation !== null) setNotice('Slip was not deleted. Type DELETE exactly to confirm.');
+      return;
+    }
     try {
-      const cancelledSlip = await apiRequest<Slip>(
-        `/vargani/slips/${slip.id}/cancel`,
-        {
-          body: JSON.stringify({ reason: 'Cancelled from Adhyaksh console' }),
-          method: 'POST',
-        },
-        session,
-      );
-      setSlips((current) => upsertById(current, cancelledSlip));
-      setNotice('Slip cancelled.');
+      await apiRequest(`/vargani/slips/${slip.id}`, { method: 'DELETE' }, session);
+      setSlips((current) => current.filter((item) => item.id !== slip.id));
+      setSlipMeta((current) => ({
+        ...current,
+        total: Math.max(0, current.total - 1),
+        totalPages: Math.max(1, Math.ceil(Math.max(0, current.total - 1) / current.limit)),
+      }));
+      setNotice(`${slip.slipNumber} permanently deleted.`);
       scheduleWorkspaceSync(session);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not cancel slip.');
+      setNotice(error instanceof Error ? error.message : 'Could not delete slip.');
     }
   }
 
@@ -2390,7 +2465,7 @@ export default function App() {
       onArchiveMember={archiveMember}
       onAddTemplateField={addTemplateCustomField}
       onAssignMemberGroup={assignMemberGroup}
-      onCancelSlip={cancelSlip}
+      onDeleteSlip={deleteSlip}
       onCreateMember={createMember}
       onCreateExpense={createExpense}
       onCreateGroup={createGroup}
@@ -2563,7 +2638,7 @@ function AdhyakshApp({
   onArchiveMember,
   onAddTemplateField,
   onAssignMemberGroup,
-  onCancelSlip,
+  onDeleteSlip,
   onCreateMember,
   onCreateExpense,
   onCreateGroup,
@@ -2622,7 +2697,7 @@ function AdhyakshApp({
   onArchiveMember: (member: Member) => Promise<void> | void;
   onAddTemplateField: (label: string, required?: boolean) => Promise<CustomField | void>;
   onAssignMemberGroup: (member: Member, groupId: string) => Promise<void> | void;
-  onCancelSlip: (slip: Slip) => Promise<void> | void;
+  onDeleteSlip: (slip: Slip) => Promise<void> | void;
   onCreateMember: (event: FormEvent<HTMLFormElement>) => Promise<boolean | void> | boolean | void;
   onCreateExpense: (event: FormEvent<HTMLFormElement>) => Promise<boolean | void> | boolean | void;
   onCreateGroup: (event: FormEvent<HTMLFormElement>) => Promise<boolean | void> | boolean | void;
@@ -3319,7 +3394,7 @@ function AdhyakshApp({
                     <button onClick={() => { setSelectedSlip(slip); void onEditSlip(slip); }} type="button"><Edit3 size={16} />Edit</button>
                     <button className="mini-link" onClick={() => { setSelectedSlip(slip); void onDownloadSlip(slip); }} type="button"><Download size={16} />Slip</button>
                     <button className="whatsapp-action" onClick={() => { setSelectedSlip(slip); void onShareSlip(slip); }} type="button"><WhatsAppIcon />WhatsApp</button>
-                    <button onClick={() => void onCancelSlip(slip)} type="button"><Trash2 size={16} /></button>
+                    <button aria-label={`Delete ${slip.slipNumber}`} onClick={() => void onDeleteSlip(slip)} title="Delete slip" type="button"><Trash2 size={16} /></button>
                   </span>
                 </div>
               ))}
@@ -3733,7 +3808,7 @@ function ContributorNameFields({
     if (manualMarathi || !name.trim()) return;
     const controller = new AbortController();
     const timeout = window.setTimeout(() => {
-      void requestAzureMarathiTransliteration(name, session, controller.signal)
+      void requestMarathiTranslation(name, session, controller.signal)
         .then((suggestion) => setMarathiName(suggestion))
         .catch(() => undefined);
     }, 450);
@@ -3782,7 +3857,7 @@ function ContributorAddressFields({
     if (manualMarathi || !address.trim()) return;
     const controller = new AbortController();
     const timeout = window.setTimeout(() => {
-      void requestAzureMarathiTransliteration(address, session, controller.signal)
+      void requestMarathiTranslation(address, session, controller.signal)
         .then((suggestion) => setMarathiAddress(suggestion))
         .catch(() => undefined);
     }, 450);
@@ -5404,6 +5479,7 @@ function ThemedDialogModal({
           <label className="themed-dialog-input">
             {dialog.multiline ? (
               <textarea
+                aria-label={dialog.placeholder ?? dialog.title}
                 autoFocus
                 onFocus={(event) => event.currentTarget.select()}
                 onChange={(event) => setValue(event.target.value)}
@@ -5412,6 +5488,7 @@ function ThemedDialogModal({
               />
             ) : (
               <input
+                aria-label={dialog.placeholder ?? dialog.title}
                 autoFocus
                 onFocus={(event) => event.currentTarget.select()}
                 onChange={(event) => setValue(event.target.value)}
@@ -5427,6 +5504,7 @@ function ThemedDialogModal({
           </button>
           <button
             className={dialog.danger ? 'danger-action' : 'primary'}
+            disabled={dialog.type === 'prompt' && Boolean(dialog.requiredValue) && value !== dialog.requiredValue}
             onClick={dialog.type === 'confirm' ? () => onClose(true) : undefined}
             type={dialog.type === 'confirm' ? 'button' : 'submit'}
           >
