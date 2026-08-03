@@ -3,6 +3,7 @@ import {
   BadgeIndianRupee,
   Building2,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   ClipboardList,
   Copy,
@@ -2509,30 +2510,13 @@ function ActionLoaderOverlay({ message }: { message: string }) {
 
 function LoadingCard({ compact = false, detail }: { compact?: boolean; detail: string }) {
   return (
-    <section className={`loading-card ${compact ? 'compact' : ''}`}>
-      <PenWritingLoader />
+    <section aria-busy="true" className={`loading-card ${compact ? 'compact' : ''}`}>
+      <span aria-hidden="true" className="simple-spinner workspace-spinner" />
       <div className="loading-copy">
-        <strong>Loading</strong>
+        <strong>{compact ? 'Please wait' : 'Loading workspace'}</strong>
         <span>{detail}</span>
       </div>
     </section>
-  );
-}
-
-function PenWritingLoader() {
-  return (
-    <div aria-hidden="true" className="pen-loader">
-      <svg viewBox="0 0 220 118" role="img">
-        <path className="pen-line line-one" d="M30 82 C58 50 82 104 112 70 S160 58 190 80" />
-        <path className="pen-line line-two" d="M42 96 C82 82 118 102 178 92" />
-        <g className="pen-body">
-          <path d="M130 30 L177 77 L166 88 L119 41 Z" />
-          <path d="M111 49 L119 41 L166 88 L158 96 Z" />
-          <path d="M105 55 L111 49 L158 96 L145 101 Z" />
-          <circle cx="154" cy="53" r="4" />
-        </g>
-      </svg>
-    </div>
   );
 }
 
@@ -2964,9 +2948,14 @@ function AdhyakshApp({
             <small>{mandalIdentity.name}</small>
           </div>
         </div>
-        <button className="mobile-menu-toggle" onClick={() => setSidebarOpen((open) => !open)} type="button">
-          {sidebarOpen ? <X size={22} /> : <Menu size={22} />}
-        </button>
+        <div className="mobile-workspace-actions">
+          <div aria-label={`Signed in as ${session.user.name}`} className="mobile-user-avatar" title={session.user.name}>
+            {session.user.name.charAt(0)}
+          </div>
+          <button aria-label={sidebarOpen ? 'Close navigation menu' : 'Open navigation menu'} className="mobile-menu-toggle" onClick={() => setSidebarOpen((open) => !open)} type="button">
+            {sidebarOpen ? <X size={22} /> : <Menu size={22} />}
+          </button>
+        </div>
       </div>
       {sidebarOpen && <button aria-label="Close menu" className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} type="button" />}
       <aside className="member-sidebar adhyaksh-sidebar">
@@ -3806,6 +3795,19 @@ function FormManagementView({
   onUpdateEntryField: (key: EntryFieldKey, patch: Partial<EntryFieldConfig>) => void;
 }) {
   const fields = [...(activeForm?.customFields ?? [])].sort((a, b) => a.sortOrder - b.sortOrder);
+  const standardFields = entryFields.filter((field) => field.visible);
+  const questionRows = [
+    ...standardFields.map((field) => ({ field, kind: 'standard' as const })),
+    ...fields.map((field) => ({ field, kind: 'custom' as const })),
+  ];
+  const pageSize = 5;
+  const [questionPage, setQuestionPage] = useState(1);
+  const questionPageCount = Math.max(1, Math.ceil(questionRows.length / pageSize));
+  const visibleQuestionRows = questionRows.slice((questionPage - 1) * pageSize, questionPage * pageSize);
+
+  useEffect(() => {
+    setQuestionPage((current) => Math.min(current, questionPageCount));
+  }, [questionPageCount]);
 
   return (
     <section className="adhyaksh-page">
@@ -3848,93 +3850,161 @@ function FormManagementView({
         <div className="form-management-card current-questions-card">
           <div>
             <h3>Current Form Questions</h3>
-            <p>Every field used by New Vargani Entry is listed here. Rename questions, change optional fields, or remove fields this mandal does not use.</p>
+            <p>Review every question used in New Vargani Entry. Standard and custom fields are managed together in one clear list.</p>
           </div>
-          <h4 className="managed-fields-title">Standard Vargani Questions</h4>
           <div className="managed-fields-table">
             <div className="managed-fields-head question-fields-head">
               <span>Question shown on form</span>
               <span>Type</span>
               <span>Required</span>
+              <span>Actions</span>
             </div>
-            {entryFields.filter((field) => field.visible).map((field) => (
-              <div className="managed-fields-row question-display-row" key={field.key}>
-                <span className="managed-question-label">{field.label}</span>
-                <span>{field.type}</span>
-                <strong>{field.required ? 'Yes' : 'No'}</strong>
-                <span className="row-actions managed-field-actions">
-                  <button onClick={async () => {
-                      const nextLabel = (await onPrompt({
-                        defaultValue: field.label,
-                        placeholder: 'Enter question label',
-                        title: 'Edit question label',
-                      }))?.trim();
-                      if (nextLabel && nextLabel !== field.label) onUpdateEntryField(field.key, { label: nextLabel });
-                    }} type="button">
-                    <Edit3 size={16} />Edit
-                  </button>
-                  <button
-                    disabled={field.locked}
-                    onClick={() => onUpdateEntryField(field.key, { required: !field.required })}
-                    title={field.locked ? 'Required for receipt generation' : undefined}
-                    type="button"
-                  >
-                    {field.locked ? 'Required for Receipt' : field.required ? 'Make Optional' : 'Make Compulsory'}
-                  </button>
-                  <button
-                    className="danger"
-                    disabled={field.locked}
-                    onClick={() => onUpdateEntryField(field.key, { visible: false })}
-                    title={field.locked ? 'This field is required for receipt generation' : undefined}
-                    type="button"
-                  >
-                    <Trash2 size={16} />{field.locked ? 'Protected' : 'Remove'}
-                  </button>
-                </span>
-              </div>
-            ))}
+            {questionRows.length === 0 && <EmptyTableState message="No form questions are available yet." />}
+            {visibleQuestionRows.map((row) => {
+              if (row.kind === 'standard') {
+                const field = row.field;
+                return (
+                  <div className="managed-fields-row question-display-row" key={`standard-${field.key}`}>
+                    <span className="managed-question-label" data-label="Question">
+                      <span>{field.label}</span>
+                      <small className="question-source standard">Standard</small>
+                    </span>
+                    <span data-label="Type">{field.type.replace('_', ' ')}</span>
+                    <strong data-label="Required"><span className={`required-status ${field.required ? 'yes' : 'no'}`}>{field.required ? 'Yes' : 'No'}</span></strong>
+                    <span className="row-actions managed-field-actions">
+                      <button onClick={async () => {
+                          const nextLabel = (await onPrompt({
+                            defaultValue: field.label,
+                            placeholder: 'Enter question label',
+                            title: 'Edit question label',
+                          }))?.trim();
+                          if (nextLabel && nextLabel !== field.label) onUpdateEntryField(field.key, { label: nextLabel });
+                        }} type="button">
+                        <Edit3 size={16} />Edit
+                      </button>
+                      <button
+                        disabled={field.locked}
+                        onClick={() => onUpdateEntryField(field.key, { required: !field.required })}
+                        title={field.locked ? 'Required for receipt generation' : undefined}
+                        type="button"
+                      >
+                        {field.locked ? 'Receipt required' : field.required ? 'Make optional' : 'Make required'}
+                      </button>
+                      <button
+                        className="danger"
+                        disabled={field.locked}
+                        onClick={() => onUpdateEntryField(field.key, { visible: false })}
+                        title={field.locked ? 'This field is required for receipt generation' : undefined}
+                        type="button"
+                      >
+                        <Trash2 size={16} />{field.locked ? 'Protected' : 'Remove'}
+                      </button>
+                    </span>
+                  </div>
+                );
+              }
+
+              const field = row.field;
+              return (
+                <div className="managed-fields-row question-display-row" key={`custom-${field.id}`}>
+                  <span className="managed-question-label" data-label="Question">
+                    <span>{field.label}</span>
+                    <small className="question-source custom">Custom</small>
+                  </span>
+                  <span data-label="Type">{field.type.replace('_', ' ')}</span>
+                  <strong data-label="Required"><span className={`required-status ${field.required ? 'yes' : 'no'}`}>{field.required ? 'Yes' : 'No'}</span></strong>
+                  <span className="row-actions managed-field-actions">
+                    <button onClick={async () => {
+                        const nextLabel = (await onPrompt({
+                          defaultValue: field.label,
+                          placeholder: 'Enter question label',
+                          title: 'Edit question label',
+                        }))?.trim();
+                        if (nextLabel && nextLabel !== field.label) void onUpdateField(field, { label: nextLabel });
+                      }} type="button">
+                      <Edit3 size={16} />Edit
+                    </button>
+                    <button
+                      onClick={() => void onUpdateField(field, { required: !field.required })}
+                      type="button"
+                    >
+                      {field.required ? 'Make optional' : 'Make required'}
+                    </button>
+                    <button onClick={() => void onUpdateField(field, { printOnSlip: !field.printOnSlip })} type="button">
+                      {field.printOnSlip ? 'Hide from template' : 'Allow on template'}
+                    </button>
+                    <button className="danger" onClick={() => void onDeleteField(field)} type="button"><Trash2 size={16} />Delete</button>
+                  </span>
+                </div>
+              );
+            })}
           </div>
-          <h4 className="managed-fields-title">Custom Questions</h4>
-          <div className="managed-fields-table">
-            <div className="managed-fields-head question-fields-head">
-              <span>Question shown on form</span>
-              <span>Type</span>
-              <span>Required</span>
-            </div>
-            {fields.length === 0 && <EmptyTableState message="No custom form questions added yet." />}
-            {fields.map((field) => (
-              <div className="managed-fields-row question-display-row" key={field.id}>
-                <span className="managed-question-label">{field.label}</span>
-                <span>{field.type.replace('_', ' ')}</span>
-                <strong>{field.required ? 'Yes' : 'No'}</strong>
-                <span className="row-actions managed-field-actions">
-                  <button
-                    onClick={async () => {
-                      const nextLabel = (await onPrompt({
-                        defaultValue: field.label,
-                        placeholder: 'Enter question label',
-                        title: 'Edit question label',
-                      }))?.trim();
-                      if (nextLabel && nextLabel !== field.label) void onUpdateField(field, { label: nextLabel });
-                    }}
-                    type="button"
-                  >
-                    <Edit3 size={16} />Edit
-                  </button>
-                  <button onClick={() => void onUpdateField(field, { required: !field.required })} type="button">
-                    {field.required ? 'Make Optional' : 'Make Compulsory'}
-                  </button>
-                  <button onClick={() => void onUpdateField(field, { printOnSlip: !field.printOnSlip })} type="button">
-                    {field.printOnSlip ? 'Remove From Template Fields' : 'Allow On Template'}
-                  </button>
-                  <button className="danger" onClick={() => void onDeleteField(field)} type="button"><Trash2 size={16} />Delete</button>
-                </span>
-              </div>
-            ))}
-          </div>
+          <Pagination
+            onPageChange={setQuestionPage}
+            page={questionPage}
+            pageSize={pageSize}
+            totalItems={questionRows.length}
+            totalPages={questionPageCount}
+          />
         </div>
       </div>
     </section>
+  );
+}
+
+function Pagination({
+  onPageChange,
+  page,
+  pageSize,
+  totalItems,
+  totalPages,
+}: {
+  onPageChange: (page: number) => void;
+  page: number;
+  pageSize: number;
+  totalItems: number;
+  totalPages: number;
+}) {
+  if (totalItems === 0) return null;
+
+  const firstItem = (page - 1) * pageSize + 1;
+  const lastItem = Math.min(page * pageSize, totalItems);
+  const visiblePages = Array.from({ length: totalPages }, (_, index) => index + 1)
+    .filter((pageNumber) => totalPages <= 5 || pageNumber === 1 || pageNumber === totalPages || Math.abs(pageNumber - page) <= 1);
+
+  return (
+    <nav aria-label="Form questions pagination" className="table-pagination">
+      <p>Showing <strong>{firstItem}–{lastItem}</strong> of <strong>{totalItems}</strong> questions</p>
+      <div className="pagination-controls">
+        <button aria-label="Previous page" disabled={page === 1} onClick={() => onPageChange(page - 1)} type="button">
+          <ChevronLeft size={17} />
+          <span>Previous</span>
+        </button>
+        <div className="pagination-pages">
+          {visiblePages.map((pageNumber, index) => {
+            const previousPage = visiblePages[index - 1];
+            return (
+              <span className="pagination-page-slot" key={pageNumber}>
+                {previousPage && pageNumber - previousPage > 1 && <span aria-hidden="true" className="pagination-ellipsis">…</span>}
+                <button
+                  aria-current={pageNumber === page ? 'page' : undefined}
+                  aria-label={`Page ${pageNumber}`}
+                  className={pageNumber === page ? 'active' : ''}
+                  onClick={() => onPageChange(pageNumber)}
+                  type="button"
+                >
+                  {pageNumber}
+                </button>
+              </span>
+            );
+          })}
+        </div>
+        <button aria-label="Next page" disabled={page === totalPages} onClick={() => onPageChange(page + 1)} type="button">
+          <span>Next</span>
+          <ChevronRight size={17} />
+        </button>
+      </div>
+    </nav>
   );
 }
 
@@ -5420,9 +5490,9 @@ function LoginPanel({
                 </button>
               </span>
             </label>
-            <button className="primary" disabled={busy} type="submit">
-              <ShieldCheck size={18} />
-              {busy ? 'Signing in...' : 'Sign in securely'}
+            <button aria-busy={busy} className="primary login-submit" disabled={busy} type="submit">
+              {busy ? <span aria-hidden="true" className="simple-spinner button-spinner" /> : <ShieldCheck size={18} />}
+              {busy ? 'Signing in' : 'Sign in securely'}
             </button>
 
             <p className="auth-security-note">
@@ -5431,7 +5501,7 @@ function LoginPanel({
             </p>
           </form>
 
-          {shouldShowNotice && <div className={`notice ${busy ? 'busy' : ''}`}>{busy ? 'Working...' : notice}</div>}
+          {shouldShowNotice && <div aria-live="polite" className={`notice ${busy ? 'busy' : ''}`}>{busy ? 'Verifying your account securely…' : notice}</div>}
 
           {isOwner && (
             <button className="auth-back-bottom" onClick={() => setLoginMode('mandal')} type="button">

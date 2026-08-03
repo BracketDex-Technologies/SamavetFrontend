@@ -4135,6 +4135,349 @@ button.pending-action {
   }
 }
 
+/* Form management: clear data hierarchy, compact actions, and predictable paging. */
+.current-questions-card {
+  align-content: start;
+}
+
+.managed-fields-head.question-fields-head,
+.managed-fields-row.question-display-row {
+  grid-template-columns: minmax(210px, 1fr) 100px 90px minmax(250px, 1.2fr);
+}
+
+.managed-fields-row.question-display-row {
+  min-height: 76px;
+}
+
+.managed-fields-row.question-display-row .managed-field-actions {
+  background: transparent;
+  grid-column: auto;
+  padding: 0;
+}
+
+.managed-question-label {
+  align-items: flex-start;
+  display: grid;
+  gap: 6px;
+}
+
+.managed-question-label > span {
+  line-height: 1.35;
+}
+
+.managed-fields-row .question-source {
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 10px;
+  font-weight: 750;
+  justify-self: start;
+  letter-spacing: 0.04em;
+  margin: 0;
+  padding: 4px 8px;
+  text-transform: uppercase;
+}
+
+.question-source.standard {
+  background: #eef2ff;
+  color: #4338ca;
+}
+
+.question-source.custom {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.managed-fields-row.question-display-row > strong {
+  background: transparent;
+  padding: 0;
+}
+
+.required-status {
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 750;
+  justify-content: center;
+  min-width: 48px;
+  padding: 6px 10px;
+}
+
+.required-status.yes {
+  background: #ecfdf3;
+  color: #15803d;
+}
+
+.required-status.no {
+  background: #f4f4f5;
+  color: #52525b;
+}
+
+.table-pagination {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin-top: -2px;
+  padding-top: 16px;
+}
+
+.table-pagination p {
+  color: #667085;
+  font-size: 13px;
+  font-weight: 500;
+  margin: 0;
+}
+
+.table-pagination p strong {
+  color: var(--ink);
+  font-weight: 750;
+}
+
+.pagination-controls,
+.pagination-pages,
+.pagination-page-slot {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.pagination-controls > button,
+.pagination-pages button {
+  align-items: center;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  color: #475467;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 6px;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 11px;
+}
+
+.pagination-pages button {
+  min-width: 38px;
+  padding: 0 8px;
+}
+
+.pagination-pages button.active {
+  background: #fff1e7;
+  border-color: #fdba74;
+  color: var(--orange-dark);
+}
+
+.pagination-controls button:disabled {
+  background: #f8fafc;
+  color: #a0a8b5;
+  cursor: not-allowed;
+}
+
+.pagination-ellipsis {
+  color: #98a2b3;
+  min-width: 18px;
+  text-align: center;
+}
+
+/* A static status card replaces the long pen animation. */
+.loading-card {
+  border-radius: 20px;
+  gap: 12px;
+  min-width: min(320px, calc(100vw - 40px));
+  padding: 28px;
+}
+
+.loading-brand {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.loading-brand img {
+  height: 46px;
+  object-fit: contain;
+  width: 46px;
+}
+
+.loading-brand span {
+  color: #7c2d12;
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.loading-copy strong {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 20px;
+}
+
+.loading-copy span {
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.mobile-workspace-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.mobile-user-avatar {
+  align-items: center;
+  background: #fff1e7;
+  border: 1px solid #fed7aa;
+  border-radius: 12px;
+  color: var(--orange-dark);
+  display: none;
+  flex: 0 0 44px;
+  font-size: 15px;
+  font-weight: 800;
+  height: 44px;
+  justify-content: center;
+  text-transform: uppercase;
+  width: 44px;
+}
+
+@media (min-width: 1181px) {
+  .adhyaksh-shell .adhyaksh-header {
+    padding-right: 18px;
+  }
+
+  .adhyaksh-shell .adhyaksh-header-actions {
+    margin-left: auto;
+  }
+
+  .adhyaksh-shell .top-user.mini {
+    margin-right: 0;
+    padding-right: 10px;
+  }
+}
+
+/* Professional loading feedback for authentication and workspace bootstrap. */
+.simple-spinner {
+  animation: simple-spinner-rotate 700ms linear infinite;
+  border: 3px solid rgba(124, 45, 18, 0.16);
+  border-radius: 50%;
+  border-top-color: var(--orange);
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
+.workspace-spinner {
+  height: 34px;
+  width: 34px;
+}
+
+.button-spinner {
+  border-color: rgba(255, 255, 255, 0.28);
+  border-top-color: #fff;
+  height: 18px;
+  width: 18px;
+}
+
+.login-panel.clean .login-submit[aria-busy="true"] {
+  cursor: wait;
+  opacity: 0.92;
+}
+
+@keyframes simple-spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .simple-spinner {
+    animation-duration: 1.6s;
+  }
+}
+
+@media (max-width: 1180px) {
+  .mobile-user-avatar {
+    display: inline-flex;
+  }
+}
+
+@media (max-width: 760px) {
+  .form-management-card h3 {
+    font-size: 21px;
+  }
+
+  .form-management-card p {
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .managed-fields-row.question-display-row > [data-label]::before {
+    color: #7b8494;
+    content: attr(data-label);
+    display: block;
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: 0.05em;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+  }
+
+  .managed-fields-row.question-display-row .managed-field-actions {
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+  }
+
+  .table-pagination {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .table-pagination p {
+    text-align: center;
+  }
+
+  .pagination-controls {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
+    width: 100%;
+  }
+
+  .pagination-controls > button {
+    min-height: 44px;
+    padding: 0;
+  }
+
+  .pagination-controls > button span {
+    display: none;
+  }
+
+  .pagination-pages {
+    justify-content: center;
+    min-width: 0;
+  }
+
+  .pagination-pages button {
+    min-height: 44px;
+    min-width: 40px;
+  }
+}
+
+@media (max-width: 420px) {
+  .mobile-user-avatar {
+    flex-basis: 40px;
+    height: 40px;
+    width: 40px;
+  }
+
+  .adhyaksh-shell .mobile-workspace-bar .mobile-menu-toggle {
+    flex-basis: 40px;
+    height: 40px;
+    width: 40px;
+  }
+
+  .pagination-pages button {
+    min-width: 36px;
+  }
+}
+
 
 /* ═══════════════════════════════════════════════════════
    Digital Vargani — Festive Design System & Landing Page
@@ -9953,5 +10296,50 @@ html:lang(hi) #root {
   .adhyaksh-shell .mobile-workspace-brand small,
   .collector-shell .mobile-workspace-brand small {
     max-width: 54vw !important;
+  }
+}
+
+/* Final cascade ownership for the form workspace and static loading state. */
+@media (min-width: 761px) {
+  .managed-fields-head.question-fields-head,
+  .managed-fields-row.question-display-row {
+    grid-template-columns: minmax(210px, 1fr) 100px 90px minmax(250px, 1.2fr);
+  }
+
+  .managed-fields-row.question-display-row .managed-field-actions {
+    grid-column: auto;
+  }
+}
+
+.loading-card,
+.loading-card.compact {
+  border-radius: 20px;
+  gap: 12px;
+  min-width: min(320px, calc(100vw - 40px));
+  padding: 28px;
+}
+
+.loading-copy strong {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 20px;
+}
+
+.loading-copy span {
+  font-size: 13px;
+  font-weight: 550;
+}
+
+@media (min-width: 1181px) {
+  .adhyaksh-shell .adhyaksh-header {
+    padding-right: 18px;
+  }
+
+  .adhyaksh-shell .adhyaksh-header-actions {
+    margin-left: auto;
+  }
+
+  .adhyaksh-shell .top-user.mini {
+    margin-right: 0;
+    padding-right: 10px;
   }
 }
