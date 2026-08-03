@@ -4444,6 +4444,46 @@ button.pending-action {
 }
 
 /* Professional loading feedback for authentication and workspace bootstrap. */
+.workspace-starting-toast {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(234, 88, 12, 0.18);
+  border-radius: 14px;
+  box-shadow: 0 14px 38px rgba(48, 31, 24, 0.16);
+  display: flex;
+  gap: 12px;
+  left: 50%;
+  max-width: calc(100vw - 32px);
+  padding: 12px 16px;
+  position: fixed;
+  top: max(16px, env(safe-area-inset-top));
+  transform: translateX(-50%);
+  width: max-content;
+  z-index: 1200;
+}
+
+.workspace-starting-toast .simple-spinner {
+  flex: 0 0 auto;
+  height: 22px;
+  width: 22px;
+}
+
+.workspace-starting-toast > span:last-child {
+  display: grid;
+  gap: 2px;
+}
+
+.workspace-starting-toast strong {
+  color: #2f2420;
+  font-size: 0.9rem;
+  line-height: 1.2;
+}
+
+.workspace-starting-toast small {
+  color: #766b66;
+  font-size: 0.75rem;
+}
+
 .simple-spinner {
   animation: simple-spinner-rotate 700ms linear infinite;
   border: 3px solid rgba(124, 45, 18, 0.16);

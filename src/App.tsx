@@ -45,7 +45,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, PointerEvent, ReactNode } from 'react';
-import { ApiError, ApiNetworkError, ApiTimeoutError, apiDownload, apiRequest, sessionForStorage } from './api/client';
+import { API_BASE_URL, ApiError, ApiNetworkError, ApiTimeoutError, apiDownload, apiRequest, sessionForStorage } from './api/client';
 import {
   focusFormErrorFromMessage,
   setFormFieldError,
@@ -730,6 +730,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (session || !authReady) return;
+
+    // Start DNS/TLS negotiation and establish a database connection while the
+    // user is typing. This is intentionally fire-and-forget: login never waits
+    // for the warm-up request and remains fully functional if it fails.
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 5_000);
+    void fetch(`${API_BASE_URL}/health/ready`, {
+      credentials: 'omit',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    }).catch(() => undefined).finally(() => window.clearTimeout(timeout));
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [authReady, session]);
+
+  useEffect(() => {
     window.localStorage.setItem(LANGUAGE_KEY, language);
     document.documentElement.lang = language === 'mr' ? 'mr' : language === 'hi' ? 'hi' : 'en';
   }, [language]);
@@ -1105,10 +1125,11 @@ export default function App() {
       window.localStorage.setItem(SESSION_KEY, JSON.stringify(sessionForStorage(nextSession)));
       setWorkspaceLoaded(false);
       setNotice('');
-      // Keep one consistent sign-in state until the bootstrap is ready so the
-      // dashboard appears directly instead of flashing multiple loaders.
-      await loadWorkspace(nextSession);
+      // Authentication is the only blocking step. Open the correct role-based
+      // shell immediately, then hydrate its data without another full-screen
+      // loader or extending the "Signing in" state.
       setSession(nextSession);
+      void loadWorkspace(nextSession);
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setNotice('Incorrect username or password.');
@@ -2380,6 +2401,12 @@ export default function App() {
   const withActionOverlay = (content: ReactNode) => (
     <>
       {content}
+      {session && workspaceRefreshing && !workspaceLoaded && (
+        <div aria-live="polite" className="workspace-starting-toast" role="status">
+          <span aria-hidden="true" className="simple-spinner" />
+          <span><strong>Opening workspace</strong><small>Loading your latest data…</small></span>
+        </div>
+      )}
       {overlayMessage && <ActionLoaderOverlay message={overlayMessage} />}
       {themedDialog && <ThemedDialogModal dialog={themedDialog} onClose={closeThemedDialog} />}
     </>
@@ -2387,10 +2414,6 @@ export default function App() {
 
   if (!authReady) {
     return <AuthLoadingScreen detail="Checking saved login..." />;
-  }
-
-  if (session && !workspaceLoaded && workspaceRefreshing) {
-    return <AuthLoadingScreen detail="Opening your workspace..." />;
   }
 
   const isCollectorRole = session?.user.role === 'MEMBER' || session?.user.role === 'GROUP_LEADER';
