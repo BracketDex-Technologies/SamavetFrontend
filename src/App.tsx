@@ -943,6 +943,7 @@ export default function App() {
   async function deleteCustomField(field: CustomField) {
     if (!session || !session.user.mandalId || !activeForm) return;
     const confirmed = await askConfirm({
+      confirmLabel: 'Delete Question',
       danger: true,
       message: `Existing slips will keep old data for "${field.label}".`,
       title: 'Delete form question?',
@@ -1903,6 +1904,7 @@ export default function App() {
   async function deleteExpense(expense: Expense) {
     if (!session || !mandalId || !festivalId) return;
     const confirmed = await askConfirm({
+      confirmLabel: 'Delete Expense',
       danger: true,
       message: `${expense.vendorName || expense.notes || 'This expense'} will be permanently deleted.`,
       title: 'Delete expense?',
@@ -2052,6 +2054,7 @@ export default function App() {
   async function deleteTask(task: FestivalTask) {
     if (!session || !mandalId || !festivalId) return;
     const confirmed = await askConfirm({
+      confirmLabel: 'Delete Task',
       danger: true,
       message: task.title,
       title: 'Delete task?',
@@ -2246,6 +2249,7 @@ export default function App() {
   async function cancelSlip(slip: Slip) {
     if (!session) return;
     const confirmed = await askConfirm({
+      confirmLabel: 'Cancel Slip',
       danger: true,
       message: `${slip.slipNumber} for ${slip.contributorName} will be cancelled.`,
       title: 'Cancel slip?',
@@ -2653,7 +2657,7 @@ function AdhyakshApp({
   const [slipFilter, setSlipFilter] = useState<'all' | 'paid' | 'pending'>('all');
   const [slipCreatorFilter, setSlipCreatorFilter] = useState('');
   const [slipDateFilter, setSlipDateFilter] = useState('');
-  const [entriesExporting, setEntriesExporting] = useState(false);
+  const [entriesExporting, setEntriesExporting] = useState<null | 'excel' | 'pdf'>(null);
   const deferredQuery = useDeferredValue(query);
   const slipFilterStartedRef = useRef(false);
   const activeYear = festivalYear(activeForm?.festival);
@@ -2870,7 +2874,7 @@ function AdhyakshApp({
       return;
     }
 
-    setEntriesExporting(true);
+    setEntriesExporting('excel');
     try {
       const { blob, fileName } = await apiDownload(
         `/mandals/${mandalId}/festivals/${festivalId}/reports/collections.xlsx`,
@@ -2888,7 +2892,37 @@ function AdhyakshApp({
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not download Excel sheet.');
     } finally {
-      setEntriesExporting(false);
+      setEntriesExporting(null);
+    }
+  }
+
+  async function downloadAccountingPdf() {
+    const mandalId = mandal?.id;
+    const festivalId = activeForm?.festival.id;
+    if (!mandalId || !festivalId) {
+      showToast('Active mandal festival not found. Refresh and try again.');
+      return;
+    }
+
+    setEntriesExporting('pdf');
+    try {
+      const { blob, fileName } = await apiDownload(
+        `/mandals/${mandalId}/festivals/${festivalId}/reports/collections.pdf`,
+        session,
+      );
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = fileName || `${slugify(mandal.name)}-financial-report.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      showToast('Accounting PDF downloaded successfully.');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not download accounting PDF.');
+    } finally {
+      setEntriesExporting(null);
     }
   }
 
@@ -3198,7 +3232,8 @@ function AdhyakshApp({
             <div className="wide-card action-card">
               <div><h2>Vargani Slips</h2><span>Generate and manage vargani receipts.</span></div>
               <div className="vargani-page-actions">
-                <button disabled={entriesExporting} onClick={() => void downloadAllVarganiEntries()} type="button"><Download size={18} />{entriesExporting ? 'Preparing Excel...' : 'Download Excel'}</button>
+                <button disabled={entriesExporting !== null} onClick={() => void downloadAllVarganiEntries()} type="button"><Download size={18} />{entriesExporting === 'excel' ? 'Preparing Excel...' : 'Download Excel'}</button>
+                <button disabled={entriesExporting !== null} onClick={() => void downloadAccountingPdf()} type="button"><FileText size={18} />{entriesExporting === 'pdf' ? 'Preparing PDF...' : 'Accounting PDF'}</button>
                 <button className="blue-action" onClick={() => setEntryOpen(true)} type="button"><Plus size={18} />New Vargani Entry</button>
               </div>
             </div>
@@ -5285,7 +5320,7 @@ function ThemedDialogModal({
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    onClose(dialog.type === 'prompt' ? value : true);
+    if (dialog.type === 'prompt') onClose(value);
   }
 
   return (
@@ -5323,7 +5358,11 @@ function ThemedDialogModal({
           <button onClick={() => onClose(dialog.type === 'confirm' ? false : null)} type="button">
             {dialog.cancelLabel ?? 'Cancel'}
           </button>
-          <button className={dialog.danger ? 'danger-action' : 'primary'} type="submit">
+          <button
+            className={dialog.danger ? 'danger-action' : 'primary'}
+            onClick={dialog.type === 'confirm' ? () => onClose(true) : undefined}
+            type={dialog.type === 'confirm' ? 'button' : 'submit'}
+          >
             {dialog.confirmLabel ?? (dialog.type === 'confirm' ? 'Confirm' : 'Save')}
           </button>
         </div>
