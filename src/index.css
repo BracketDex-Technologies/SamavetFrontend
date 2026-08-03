@@ -3433,11 +3433,39 @@ button.pending-action {
   padding: 4px 9px;
 }
 
-.expense-proof-field input[type='file'] {
-  background: #fff;
-  cursor: pointer;
+.expense-proof-control {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr);
   margin-top: 10px;
-  padding: 9px;
+}
+
+.expense-proof-picker {
+  align-items: center;
+  background: #fff;
+  border: 1px solid #dfc6b0;
+  border-radius: 10px;
+  color: #4d3325;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 800;
+  justify-content: center;
+  min-height: 42px;
+  padding: 0 14px;
+}
+
+.expense-proof-picker input {
+  display: none;
+}
+
+.expense-proof-control > span {
+  color: #786f69;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .expense-proof-field > small {
@@ -9127,6 +9155,7 @@ nav button.active svg,
   .adhyaksh-shell .modal-backdrop {
     align-items: flex-end;
     padding: 0;
+    z-index: 120;
   }
 
   .adhyaksh-shell .vargani-modal {
@@ -9134,8 +9163,20 @@ nav button.active svg,
     gap: 14px;
     max-height: calc(100dvh - 18px);
     max-width: none;
+    overscroll-behavior: contain;
     padding: 28px 18px calc(18px + env(safe-area-inset-bottom));
+    scrollbar-gutter: stable;
     width: 100%;
+  }
+
+  .adhyaksh-shell .vargani-modal .modal-close {
+    background: #f7f2ed;
+    border: 1px solid #e4d9d0;
+    border-radius: 10px;
+    color: #382a23;
+    right: 14px;
+    top: 14px;
+    z-index: 2;
   }
 
   .adhyaksh-shell .vargani-modal input,

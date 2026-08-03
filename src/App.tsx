@@ -45,7 +45,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, PointerEvent, ReactNode } from 'react';
-import { ApiError, ApiNetworkError, ApiTimeoutError, apiDownload, apiRequest, prewarmApi, sessionForStorage } from './api/client';
+import { ApiError, ApiNetworkError, ApiTimeoutError, apiDownload, apiRequest, sessionForStorage } from './api/client';
 import {
   focusFormErrorFromMessage,
   setFormFieldError,
@@ -1042,8 +1042,13 @@ export default function App() {
     const blob = await renderSlipJpegBlob(slip);
     const formData = new FormData();
     formData.append('file', blob, `${slip.slipNumber || slip.id}.jpg`);
-    const upload = await apiRequest<{ ok: boolean; receiptImageUrl: string; storage: string }>(
-      `/vargani/slips/${slip.id}/receipt-image-file`,
+    const upload = await apiRequest<{
+      ok: boolean;
+      receiptImageUrl: string;
+      share?: { whatsapp?: WhatsAppSendResult };
+      storage: string;
+    }>(
+      `/vargani/slips/${slip.id}/receipt-image-file?autoShare=true`,
       {
         body: formData,
         method: 'POST',
@@ -1095,20 +1100,14 @@ export default function App() {
     setNotice('');
     setLoginBusy(true);
     try {
-      let nextSession: AuthSession;
-      try {
-        nextSession = await performLogin();
-      } catch (error) {
-        if (!(error instanceof ApiTimeoutError)) throw error;
-        setNotice('Waking login service. Checking credentials again...');
-        await prewarmApi();
-        nextSession = await performLogin();
-      }
+      const nextSession = await performLogin();
       window.localStorage.setItem(SESSION_KEY, JSON.stringify(sessionForStorage(nextSession)));
-      setSession(nextSession);
       setWorkspaceLoaded(false);
       setNotice('');
-      void loadWorkspace(nextSession);
+      // Keep one consistent sign-in state until the bootstrap is ready so the
+      // dashboard appears directly instead of flashing multiple loaders.
+      await loadWorkspace(nextSession);
+      setSession(nextSession);
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setNotice('Incorrect username or password.');
@@ -1117,7 +1116,7 @@ export default function App() {
       } else if (error instanceof ApiError && error.status >= 500) {
         setNotice('Login service is temporarily busy. Please try again shortly.');
       } else if (error instanceof ApiTimeoutError || error instanceof ApiNetworkError) {
-        setNotice('Login service is waking up. Please try again in a few seconds.');
+        setNotice('Could not reach the login service. Check your connection and try again.');
       } else {
         setNotice(error instanceof Error ? error.message : 'Could not log in. Please try again.');
       }
@@ -1241,22 +1240,7 @@ export default function App() {
       queryClient.setQueryData(workspaceQueryKey(currentSession), workspace);
       writeWorkspaceCache(currentSession, workspace);
       applyWorkspaceBootstrap(workspace);
-      if (workspace.kind === 'MANDAL' && currentSession.user.mandalId && workspace.activeForm?.festival.id) {
-        const festivalPath = `/mandals/${currentSession.user.mandalId}/festivals/${workspace.activeForm.festival.id}`;
-        const isCollectorSession = currentSession.user.role === 'MEMBER' || currentSession.user.role === 'GROUP_LEADER';
-        if (isCollectorSession) {
-          const liveTasks = await apiRequest<FestivalTask[]>(`${festivalPath}/tasks`, {}, currentSession);
-          setExpenses([]);
-          setTasks(liveTasks);
-        } else {
-          const [liveExpenses, liveTasks] = await Promise.all([
-            apiRequest<Expense[]>(`${festivalPath}/expenses`, {}, currentSession),
-            apiRequest<FestivalTask[]>(`${festivalPath}/tasks`, {}, currentSession),
-          ]);
-          setExpenses(liveExpenses);
-          setTasks(liveTasks);
-        }
-      }
+      void hydrateWorkspaceDetails(currentSession, workspace);
       setNotice(
         workspace.kind === 'OWNER'
           ? 'Owner workspace loaded. Manage all onboarded mandals from here.'
@@ -1266,6 +1250,31 @@ export default function App() {
       setNotice(error instanceof Error ? error.message : 'Could not load workspace.');
     } finally {
       setWorkspaceRefreshing(false);
+    }
+  }
+
+  async function hydrateWorkspaceDetails(currentSession: AuthSession, workspace: WorkspaceBootstrap) {
+    if (workspace.kind !== 'MANDAL' || !currentSession.user.mandalId || !workspace.activeForm?.festival.id) return;
+    const festivalPath = `/mandals/${currentSession.user.mandalId}/festivals/${workspace.activeForm.festival.id}`;
+    const isCollectorSession = currentSession.user.role === 'MEMBER' || currentSession.user.role === 'GROUP_LEADER';
+
+    try {
+      if (isCollectorSession) {
+        const liveTasks = await apiRequest<FestivalTask[]>(`${festivalPath}/tasks`, {}, currentSession);
+        setExpenses([]);
+        setTasks(liveTasks);
+        return;
+      }
+
+      const [liveExpenses, liveTasks] = await Promise.all([
+        apiRequest<Expense[]>(`${festivalPath}/expenses`, {}, currentSession),
+        apiRequest<FestivalTask[]>(`${festivalPath}/tasks`, {}, currentSession),
+      ]);
+      setExpenses(liveExpenses);
+      setTasks(liveTasks);
+    } catch {
+      // The bootstrap is enough to open the app. Secondary cards can refresh
+      // quietly without blocking sign-in or covering the workspace.
     }
   }
 
@@ -1548,7 +1557,14 @@ export default function App() {
     const idempotencyKey = formElement.dataset.idempotencyKey || crypto.randomUUID();
     formElement.dataset.idempotencyKey = idempotencyKey;
     const paymentStatus = String(form.get('paymentStatus') || 'ACTIVE') === 'PENDING' ? 'PENDING' : 'ACTIVE';
-    const contributorPhone = String(form.get('contributorPhone') || '');
+    const contributorPhoneInput = String(form.get('contributorPhone') || '');
+    const contributorPhone = nationalIndianMobileNumber(contributorPhoneInput);
+    if (contributorPhoneInput && !/^[6-9][0-9]{9}$/.test(contributorPhone)) {
+      const message = 'Enter a valid 10-digit Indian WhatsApp number.';
+      setNotice(message);
+      setFormFieldError(formElement, 'contributorPhone', message);
+      return false;
+    }
     prepareWhatsAppWindow(paymentStatus);
     const customData: Record<string, unknown> = Object.fromEntries(
       (activeForm?.customFields ?? []).map((field) => [
@@ -1602,11 +1618,11 @@ export default function App() {
         setNotice(`Slip ${slip.slipNumber} generated. Preparing the receipt in the background...`);
         void (async () => {
           try {
-            await uploadRenderedSlipImage(slip);
+            const upload = await uploadRenderedSlipImage(slip);
             if (currentMandal?.whatsappMode === 'MANUAL_SHARE') {
               setNotice(`Slip ${slip.slipNumber} generated. Tap the WhatsApp button to share it manually.`);
             } else {
-              const share = await createReceiptShare(slip, contributorPhone);
+              const share = upload.share ?? await createReceiptShare(slip, contributorPhone);
               setNotice(whatsappStatusMessage(slip, share?.whatsapp, 'generated'));
             }
           } catch (shareError) {
@@ -2285,11 +2301,7 @@ export default function App() {
     }
   }
 
-  const overlayMessage = busy
-    ? busyMessage || 'Working...'
-    : workspaceRefreshing && workspaceLoaded
-    ? 'Refreshing workspace...'
-    : '';
+  const overlayMessage = busy ? busyMessage || 'Working...' : '';
   const withActionOverlay = (content: ReactNode) => (
     <>
       {content}
@@ -2665,6 +2677,7 @@ function AdhyakshApp({
   const [taskOpen, setTaskOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<FestivalTask | null>(null);
   const [expenseOpen, setExpenseOpen] = useState(false);
+  const [expenseProofName, setExpenseProofName] = useState('');
   const [modalSubmitting, setModalSubmitting] = useState<null | 'entry' | 'expense' | 'group' | 'member' | 'task'>(null);
   const [localNotice, setLocalNotice] = useState('');
   const [slipFilter, setSlipFilter] = useState<'all' | 'paid' | 'pending'>('all');
@@ -3200,7 +3213,7 @@ function AdhyakshApp({
           <section className="adhyaksh-page">
             <div className="wide-card action-card">
               <div><h2>Expenses (2026)</h2><span>Total for 2026: <b>{money(expensesTotal)}</b></span></div>
-              <button className="blue-action" onClick={() => setExpenseOpen(true)} type="button"><Plus size={18} />Add Expense</button>
+              <button className="blue-action" onClick={() => { setExpenseProofName(''); setExpenseOpen(true); }} type="button"><Plus size={18} />Add Expense</button>
             </div>
             <div className="ops-table expenses-table">
               <div className="ops-head six"><span>Description</span><span>Vendor</span><span>Paid By</span><span>Category</span><span>Date</span><span>Amount</span><span>Refund?</span><span>Actions</span></div>
@@ -3553,12 +3566,15 @@ function AdhyakshApp({
             setModalSubmitting('expense');
             try {
               const ok = await onCreateExpense(event);
-              if (ok) setExpenseOpen(false);
+              if (ok) {
+                setExpenseProofName('');
+                setExpenseOpen(false);
+              }
             } finally {
               setModalSubmitting(null);
             }
           }}>
-            <button className="modal-close" disabled={modalSubmitting === 'expense'} onClick={() => setExpenseOpen(false)} type="button"><X size={20} /></button>
+            <button aria-label="Close add expense" className="modal-close" disabled={modalSubmitting === 'expense'} onClick={() => { setExpenseProofName(''); setExpenseOpen(false); }} type="button"><X size={20} /></button>
             <h2>Add Expense</h2>
             <label>Description<input name="description" required placeholder="Expense description" /></label>
             <label>Vendor<input name="vendor" placeholder="Vendor name" /></label>
@@ -3566,12 +3582,18 @@ function AdhyakshApp({
             <label>Category<input name="category" placeholder="Decoration, sound..." /></label>
             <label>Date<input name="date" type="date" /></label>
             <label>Amount<input name="amount" inputMode="numeric" required placeholder="3500" /></label>
-            <label className="expense-proof-field">
+            <div className="expense-proof-field">
               <span className="expense-proof-heading"><span><Upload size={17} />Proof photo</span><em>Optional</em></span>
-              <input accept="image/jpeg,image/png,image/webp" name="proofPhoto" type="file" />
+              <div className="expense-proof-control">
+                <label className="expense-proof-picker">
+                  Choose photo
+                  <input accept="image/jpeg,image/png,image/webp" name="proofPhoto" onChange={(event) => setExpenseProofName(event.target.files?.[0]?.name ?? '')} type="file" />
+                </label>
+                <span>{expenseProofName || 'No photo selected'}</span>
+              </div>
               <small>Attach a bill, invoice, or payment screenshot. JPG, PNG, or WebP up to 6 MB.</small>
-            </label>
-            <div className="modal-actions"><button disabled={modalSubmitting === 'expense'} type="button" onClick={() => setExpenseOpen(false)}>Cancel</button><button className="blue-action" disabled={modalSubmitting === 'expense'} type="submit">{modalSubmitting === 'expense' ? 'Saving...' : 'Save Expense'}</button></div>
+            </div>
+            <div className="modal-actions"><button disabled={modalSubmitting === 'expense'} type="button" onClick={() => { setExpenseProofName(''); setExpenseOpen(false); }}>Cancel</button><button className="blue-action" disabled={modalSubmitting === 'expense'} type="submit">{modalSubmitting === 'expense' ? 'Saving...' : 'Save Expense'}</button></div>
           </form>
         </div>
       )}
@@ -3642,7 +3664,31 @@ function EntryCoreFields({
         marathiField={field('contributorAddressMr')}
         session={session}
       />
-      {visible('contributorPhone') && <label>{label('contributorPhone')}<input name="contributorPhone" required={field('contributorPhone').required} placeholder="10 digit WhatsApp number" /></label>}
+      {visible('contributorPhone') && (
+        <label>
+          {label('contributorPhone')}
+          <span className="phone-input-group">
+            <b aria-label="India country code plus ninety-one">+91</b>
+            <input
+              autoComplete="tel-national"
+              inputMode="numeric"
+              maxLength={10}
+              minLength={10}
+              name="contributorPhone"
+              onInput={(event) => { event.currentTarget.value = nationalIndianMobileNumber(event.currentTarget.value); }}
+              onPaste={(event) => {
+                event.preventDefault();
+                event.currentTarget.value = nationalIndianMobileNumber(event.clipboardData.getData('text'));
+              }}
+              pattern="[6-9][0-9]{9}"
+              placeholder="9876543210"
+              required={field('contributorPhone').required}
+              title="Enter a valid 10-digit Indian WhatsApp number"
+              type="tel"
+            />
+          </span>
+        </label>
+      )}
       {visible('paymentStatus') ? (
         <PaymentStatusSelector value={entryStatus} onChange={onEntryStatusChange} />
       ) : (
@@ -5414,10 +5460,6 @@ function LoginPanel({
   const [passwordVisible, setPasswordVisible] = useState(false);
   const isOwner = loginType === 'owner';
 
-  useEffect(() => {
-    void prewarmApi();
-  }, []);
-
   function setLoginMode(type: 'owner' | 'mandal') {
     setLoginType(type);
     writeRoute(routeForLogin(type === 'owner' ? 'owner' : 'mandal'));
@@ -5450,7 +5492,7 @@ function LoginPanel({
     };
   }, []);
 
-  const shouldShowNotice = busy || (notice && notice !== 'Login with main mandal admin to open the console.');
+  const shouldShowNotice = !busy && notice && notice !== 'Login with main mandal admin to open the console.';
 
   return (
     <main className="auth-page">
@@ -5561,7 +5603,7 @@ function LoginPanel({
             </p>
           </form>
 
-          {shouldShowNotice && <div aria-live="polite" className={`notice ${busy ? 'busy' : ''}`}>{busy ? 'Verifying your account securely…' : notice}</div>}
+          {shouldShowNotice && <div aria-live="polite" className="notice">{notice}</div>}
 
           {isOwner && (
             <button className="auth-back-bottom" onClick={() => setLoginMode('mandal')} type="button">
@@ -5681,7 +5723,11 @@ const LATIN_TO_MARATHI_WORDS: Record<string, string> = {
   superkar: 'सुपेकर',
   traders: 'ट्रेडर्स',
   upi: 'यूपीआय',
+  wanawadi: 'वानवडी',
   wanawadigaon: 'वानवडीगाव',
+  wanowrie: 'वानवडी',
+  wanwadi: 'वानवडी',
+  wanwadigaon: 'वानवडीगाव',
   wasti: 'वस्ती',
   yash: 'यश',
   yogesh: 'योगेश',
@@ -7539,6 +7585,13 @@ function normalizeIndianPhone(phone?: string | null) {
   if (digits.length === 10) return `91${digits}`;
   if (digits.length === 12 && digits.startsWith('91')) return digits;
   return digits;
+}
+
+function nationalIndianMobileNumber(phone?: string | null) {
+  let digits = String(phone ?? '').replace(/\D/g, '');
+  if (digits.length === 12 && digits.startsWith('91')) digits = digits.slice(2);
+  if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1);
+  return digits.slice(0, 10);
 }
 
 function workspaceQueryKey(session: AuthSession) {
