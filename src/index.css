@@ -3402,6 +3402,67 @@ button.pending-action {
   max-width: 640px;
 }
 
+.expense-proof-field {
+  background: #fff8f1;
+  border: 1px dashed #e7cdb8;
+  border-radius: 14px;
+  padding: 14px;
+}
+
+.expense-proof-heading,
+.expense-proof-heading > span {
+  align-items: center;
+  display: flex;
+}
+
+.expense-proof-heading {
+  justify-content: space-between;
+}
+
+.expense-proof-heading > span {
+  gap: 8px;
+}
+
+.expense-proof-heading em {
+  background: #f3e8dc;
+  border-radius: 999px;
+  color: #74645a;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  padding: 4px 9px;
+}
+
+.expense-proof-field input[type='file'] {
+  background: #fff;
+  cursor: pointer;
+  margin-top: 10px;
+  padding: 9px;
+}
+
+.expense-proof-field > small {
+  color: #786f69;
+  display: block;
+  font-size: 12px;
+  line-height: 1.45;
+  margin-top: 7px;
+}
+
+.expense-proof-link {
+  align-items: center;
+  color: #c2511a;
+  display: flex;
+  font-size: 12px;
+  gap: 5px;
+  margin-top: 6px;
+  text-decoration: none;
+  width: fit-content;
+}
+
+.expense-proof-link:hover {
+  text-decoration: underline;
+}
+
 @media (max-width: 1180px) {
   .shell,
   .member-shell,

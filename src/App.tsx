@@ -1840,24 +1840,37 @@ export default function App() {
     const form = new FormData(formElement);
     const description = String(form.get('description') || '').trim();
     const category = String(form.get('category') || '').trim();
+    const proofPhoto = form.get('proofPhoto');
+    if (proofPhoto instanceof File && proofPhoto.size > 6 * 1024 * 1024) {
+      setFormFieldError(formElement, 'proofPhoto', 'Proof photo must be 6 MB or smaller.');
+      return false;
+    }
+    if (proofPhoto instanceof File && proofPhoto.size > 0 && !['image/jpeg', 'image/png', 'image/webp'].includes(proofPhoto.type)) {
+      setFormFieldError(formElement, 'proofPhoto', 'Use a JPG, PNG, or WebP proof photo.');
+      return false;
+    }
+
+    const expensePayload = new FormData();
+    expensePayload.set('amount', String(Number(form.get('amount') || 0)));
+    expensePayload.set('expenseDate', String(form.get('date') || new Date().toISOString().slice(0, 10)));
+    expensePayload.set('status', 'APPROVED');
+    if (description || category) expensePayload.set('notes', category ? `${description}\nCategory: ${category}` : description);
+    const vendorName = String(form.get('vendor') || '').trim();
+    if (vendorName) expensePayload.set('vendorName', vendorName);
+    if (proofPhoto instanceof File && proofPhoto.size > 0) expensePayload.set('proofPhoto', proofPhoto);
+
     try {
       const expense = await apiRequest<Expense>(
         `/mandals/${mandalId}/festivals/${festivalId}/expenses`,
         {
-          body: JSON.stringify({
-            amount: Number(form.get('amount') || 0),
-            expenseDate: String(form.get('date') || new Date().toISOString().slice(0, 10)),
-            notes: category ? `${description}\nCategory: ${category}` : description,
-            status: 'APPROVED',
-            vendorName: String(form.get('vendor') || ''),
-          }),
+          body: expensePayload,
           method: 'POST',
         },
         session,
       );
       setExpenses((current) => upsertById(current, expense));
       formElement.reset();
-      setNotice('Expense saved to backend.');
+      setNotice(proofPhoto instanceof File && proofPhoto.size > 0 ? 'Expense and proof photo saved.' : 'Expense saved to backend.');
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not save expense.');
@@ -3194,7 +3207,10 @@ function AdhyakshApp({
               {expenses.length === 0 && <EmptyTableState message="No expenses added yet." />}
               {expenses.map((expense) => (
                 <div className="ops-row six" key={expense.id}>
-                  <strong>{expense.notes || 'Expense'}</strong><span>{expense.vendorName || '-'}</span><i className="pill role">{expense.creator?.name ?? session.user.name}</i><span>{expense.category?.name ?? 'Miscellaneous'}</span><span>{expense.expenseDate.slice(0, 10)}</span><b>{money(Number(expense.amount))}</b><i className="pill pending">{expense.status}</i>
+                  <strong>
+                    {expense.notes || 'Expense'}
+                    {expense.billFileUrl && <a className="expense-proof-link" href={expense.billFileUrl} rel="noreferrer" target="_blank"><Eye size={14} />View proof</a>}
+                  </strong><span>{expense.vendorName || '-'}</span><i className="pill role">{expense.creator?.name ?? session.user.name}</i><span>{expense.category?.name ?? 'Miscellaneous'}</span><span>{expense.expenseDate.slice(0, 10)}</span><b>{money(Number(expense.amount))}</b><i className="pill pending">{expense.status}</i>
                   <span className="row-actions">
                     <button onClick={() => void onEditExpense(expense)} type="button"><Edit3 size={16} /></button>
                     <button onClick={() => void onDeleteExpense(expense)} type="button"><Trash2 size={16} /></button>
@@ -3550,6 +3566,11 @@ function AdhyakshApp({
             <label>Category<input name="category" placeholder="Decoration, sound..." /></label>
             <label>Date<input name="date" type="date" /></label>
             <label>Amount<input name="amount" inputMode="numeric" required placeholder="3500" /></label>
+            <label className="expense-proof-field">
+              <span className="expense-proof-heading"><span><Upload size={17} />Proof photo</span><em>Optional</em></span>
+              <input accept="image/jpeg,image/png,image/webp" name="proofPhoto" type="file" />
+              <small>Attach a bill, invoice, or payment screenshot. JPG, PNG, or WebP up to 6 MB.</small>
+            </label>
             <div className="modal-actions"><button disabled={modalSubmitting === 'expense'} type="button" onClick={() => setExpenseOpen(false)}>Cancel</button><button className="blue-action" disabled={modalSubmitting === 'expense'} type="submit">{modalSubmitting === 'expense' ? 'Saving...' : 'Save Expense'}</button></div>
           </form>
         </div>
